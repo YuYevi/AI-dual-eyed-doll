@@ -1,0 +1,22 @@
+dependencies:
+  idf:
+    version: '>=4.4.0'
+description: X-Powers AXP192, AXP202, AXP2101 and TI BQ25896 power management IC library
+  for ESP-IDF. Forked from lewisxhe/XPowersLib and published as an ESP Component for
+  easy integration via idf_component.yml.
+files:
+  exclude:
+  - examples/**
+  - datasheet/**
+  - Micropython/**
+  - tools/**
+  - .github/**
+  - .pio/**
+  - .vscode/**
+license: MIT
+repository: git://github.com/cube32esp/XPowersLib.git
+repository_info:
+  commit_sha: 636f5754222da31d00f37e241e829d106a9438b3
+  path: .
+url: https://github.com/cube32esp/XPowersLib
+version: 0.3.3

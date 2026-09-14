@@ -93,9 +93,10 @@ set(EMOTE_RESOLUTION "320_240")
 # Set default assets if the board uses partition table V2
 if(CONFIG_BOARD_TYPE_AI_DUAL_EYED_DOLL)
     set(BOARD_DIR "ai-dual-eyed-doll")
-    set(BUILTIN_TEXT_FONT font_noto_sans_basic_16_4)
-    set(BUILTIN_ICON_FONT font_material_symbols_16_4)
-    set(DEFAULT_EMOJI_COLLECTION noto-color-emoji_64)
+    # This board renders fixed eye bitmaps and has no text/icon/emoji UI.
+    set(BUILTIN_TEXT_FONT "")
+    set(BUILTIN_ICON_FONT "")
+    set(DEFAULT_EMOJI_COLLECTION "")
 elseif(CONFIG_BOARD_TYPE_BREAD_COMPACT_WIFI)
     set(BOARD_DIR "bread-compact-wifi")
     set(BUILTIN_TEXT_FONT font_noto_sans_basic_14_1)
@@ -1011,6 +1012,21 @@ endif()
 
 file(GLOB COMMON_SOUNDS ${CMAKE_CURRENT_SOURCE_DIR}/assets/common/*.ogg)
 
+if(CONFIG_BOARD_TYPE_AI_DUAL_EYED_DOLL)
+    set(AI_DUAL_EYED_DOLL_ASSETS
+        "${CMAKE_CURRENT_SOURCE_DIR}/boards/ai-dual-eyed-doll/assets/Short_laugh.ogg"
+        "${CMAKE_CURRENT_SOURCE_DIR}/boards/ai-dual-eyed-doll/assets/tsundere.ogg"
+        "${CMAKE_CURRENT_SOURCE_DIR}/boards/ai-dual-eyed-doll/assets/angry.rgb565"
+        "${CMAKE_CURRENT_SOURCE_DIR}/boards/ai-dual-eyed-doll/assets/cute.rgb565"
+        "${CMAKE_CURRENT_SOURCE_DIR}/boards/ai-dual-eyed-doll/assets/happy.rgb565"
+        "${CMAKE_CURRENT_SOURCE_DIR}/boards/ai-dual-eyed-doll/assets/sad.rgb565"
+        "${CMAKE_CURRENT_SOURCE_DIR}/boards/ai-dual-eyed-doll/assets/shocked.rgb565"
+        "${CMAKE_CURRENT_SOURCE_DIR}/boards/ai-dual-eyed-doll/assets/shy.rgb565"
+        "${CMAKE_CURRENT_SOURCE_DIR}/boards/ai-dual-eyed-doll/assets/sleepy.rgb565"
+        "${CMAKE_CURRENT_SOURCE_DIR}/boards/ai-dual-eyed-doll/assets/surprised.rgb565"
+    )
+endif()
+
 # If target chip is ESP32, exclude specific files to avoid build errors
 if(CONFIG_IDF_TARGET_ESP32)
     list(REMOVE_ITEM SOURCES "audio/codecs/box_audio_codec.cc"
@@ -1066,7 +1082,7 @@ if(CONFIG_BOARD_TYPE_ESP32_P4_FUNCTION_EV_BOARD)
     )
 endif()
 idf_component_register(SRCS ${SOURCES}
-                    EMBED_FILES ${LANG_SOUNDS} ${COMMON_SOUNDS}
+                    EMBED_FILES ${LANG_SOUNDS} ${COMMON_SOUNDS} ${AI_DUAL_EYED_DOLL_ASSETS}
                     INCLUDE_DIRS ${INCLUDE_DIRS}
                     WHOLE_ARCHIVE
                     PRIV_REQUIRES
@@ -1105,19 +1121,29 @@ if(NOT CMAKE_BUILD_EARLY_EXPANSION AND NOT BOARD_NAME MATCHES "^[a-z0-9.-]+$")
         "Invalid BOARD_NAME '${BOARD_NAME}': only lowercase letters, digits, '.' and '-' are allowed"
     )
 endif()
-string(REGEX MATCH "^font_noto_sans_basic_([0-9]+)_([0-9]+)$" _font_match "${BUILTIN_TEXT_FONT}")
-if(NOT _font_match)
-    message(FATAL_ERROR "Unsupported built-in text font name: ${BUILTIN_TEXT_FONT}")
+if(BUILTIN_TEXT_FONT)
+    string(REGEX MATCH "^font_noto_sans_basic_([0-9]+)_([0-9]+)$" _font_match "${BUILTIN_TEXT_FONT}")
+    if(NOT _font_match)
+        message(FATAL_ERROR "Unsupported built-in text font name: ${BUILTIN_TEXT_FONT}")
+    endif()
+    set(TEXT_FONT_SIZE "${CMAKE_MATCH_1}")
+    set(TEXT_FONT_BPP "${CMAKE_MATCH_2}")
+else()
+    set(TEXT_FONT_SIZE 0)
+    set(TEXT_FONT_BPP 0)
 endif()
-set(TEXT_FONT_SIZE "${CMAKE_MATCH_1}")
-set(TEXT_FONT_BPP "${CMAKE_MATCH_2}")
 if(NOT CMAKE_BUILD_EARLY_EXPANSION)
     target_compile_definitions(${COMPONENT_LIB}
                         PRIVATE BOARD_TYPE=\"${BOARD_TYPE}\" BOARD_NAME=\"${BOARD_NAME}\"
                         PRIVATE BOARD_MANUFACTURER=\"${BOARD_MANUFACTURER}\"
-                        PRIVATE BUILTIN_TEXT_FONT=${BUILTIN_TEXT_FONT} BUILTIN_ICON_FONT=${BUILTIN_ICON_FONT}
                         PRIVATE TEXT_FONT_SIZE=${TEXT_FONT_SIZE} TEXT_FONT_BPP=${TEXT_FONT_BPP}
                         )
+    if(BUILTIN_TEXT_FONT)
+        target_compile_definitions(${COMPONENT_LIB} PRIVATE BUILTIN_TEXT_FONT=${BUILTIN_TEXT_FONT})
+    endif()
+    if(BUILTIN_ICON_FONT)
+        target_compile_definitions(${COMPONENT_LIB} PRIVATE BUILTIN_ICON_FONT=${BUILTIN_ICON_FONT})
+    endif()
 endif()
 
 # Add generation rules

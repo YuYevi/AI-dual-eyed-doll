@@ -1,0 +1,10 @@
+{
+    "type": "ai-dual-eyed-doll",
+    "target": "esp32s3",
+    "builds": [
+        {
+            "name": "ai-dual-eyed-doll",
+            "sdkconfig_append": []
+        }
+    ]
+}

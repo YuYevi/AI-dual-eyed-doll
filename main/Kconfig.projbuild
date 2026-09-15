@@ -132,6 +132,9 @@ choice BOARD_TYPE
         Select the physical board hardware implementation.
         The OTA board type and firmware variant name are configured separately.
 
+    config BOARD_TYPE_AI_DUAL_EYED_DOLL
+        bool "AI Dual-Eyed Doll (AI 双眼玩偶)"
+        depends on IDF_TARGET_ESP32S3
     config BOARD_TYPE_ATK_DNESP32S3
         bool "Alientek ATK-DNESP32S3 Development Board (正点原子)"
         depends on IDF_TARGET_ESP32S3

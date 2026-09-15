@@ -1012,18 +1012,18 @@ endif()
 
 file(GLOB COMMON_SOUNDS ${CMAKE_CURRENT_SOURCE_DIR}/assets/common/*.ogg)
 
+set(AI_DUAL_EYED_DOLL_ASSETS "")
 if(CONFIG_BOARD_TYPE_AI_DUAL_EYED_DOLL)
-    set(AI_DUAL_EYED_DOLL_ASSETS
-        "${CMAKE_CURRENT_SOURCE_DIR}/boards/ai-dual-eyed-doll/assets/Short_laugh.ogg"
-        "${CMAKE_CURRENT_SOURCE_DIR}/boards/ai-dual-eyed-doll/assets/tsundere.ogg"
-        "${CMAKE_CURRENT_SOURCE_DIR}/boards/ai-dual-eyed-doll/assets/angry.rgb565"
-        "${CMAKE_CURRENT_SOURCE_DIR}/boards/ai-dual-eyed-doll/assets/cute.rgb565"
-        "${CMAKE_CURRENT_SOURCE_DIR}/boards/ai-dual-eyed-doll/assets/happy.rgb565"
-        "${CMAKE_CURRENT_SOURCE_DIR}/boards/ai-dual-eyed-doll/assets/sad.rgb565"
-        "${CMAKE_CURRENT_SOURCE_DIR}/boards/ai-dual-eyed-doll/assets/shocked.rgb565"
-        "${CMAKE_CURRENT_SOURCE_DIR}/boards/ai-dual-eyed-doll/assets/shy.rgb565"
-        "${CMAKE_CURRENT_SOURCE_DIR}/boards/ai-dual-eyed-doll/assets/sleepy.rgb565"
-        "${CMAKE_CURRENT_SOURCE_DIR}/boards/ai-dual-eyed-doll/assets/surprised.rgb565"
+    file(GLOB AI_DUAL_EYED_DOLL_ASSETS
+        "${CMAKE_CURRENT_SOURCE_DIR}/boards/ai-dual-eyed-doll/assets/*.rgb565.z"
+        "${CMAKE_CURRENT_SOURCE_DIR}/boards/ai-dual-eyed-doll/assets/*.ogg"
+    )
+    list(APPEND SOURCES
+        "${CMAKE_CURRENT_SOURCE_DIR}/boards/ai-dual-eyed-doll/common/dual_eye_display.cc"
+    )
+    list(APPEND INCLUDE_DIRS
+        "${CMAKE_CURRENT_SOURCE_DIR}/boards/ai-dual-eyed-doll"
+        "${CMAKE_CURRENT_SOURCE_DIR}/boards/ai-dual-eyed-doll/common"
     )
 endif()
 

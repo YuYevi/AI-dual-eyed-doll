@@ -4,7 +4,10 @@
     "builds": [
         {
             "name": "ai-dual-eyed-doll",
-            "sdkconfig_append": []
+            "sdkconfig_append": [
+                "CONFIG_FLASH_NONE_ASSETS=y",
+                "CONFIG_ESP_MAIN_TASK_STACK_SIZE=16384"
+            ]
         }
     ]
 }

@@ -2,11 +2,6 @@
 # CMakeLists in this exact order for cmake to work correctly
 cmake_minimum_required(VERSION 3.16)
 
-# Force Ninja to use response files on Windows to avoid CreateProcess command-line limits.
-if ("${CMAKE_GENERATOR}" MATCHES "Ninja" )
-    set(CMAKE_NINJA_FORCE_RESPONSE_FILE 1 CACHE INTERNAL "" )
-endif()
-
 # Add this line to disable the specific warning
 add_compile_options(-Wno-missing-field-initializers)
 

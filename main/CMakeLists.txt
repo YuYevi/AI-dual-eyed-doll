@@ -93,9 +93,10 @@ set(EMOTE_RESOLUTION "320_240")
 # Set default assets if the board uses partition table V2
 if(CONFIG_BOARD_TYPE_AI_DUAL_EYED_DOLL)
     set(BOARD_DIR "ai-dual-eyed-doll")
-    set(BUILTIN_TEXT_FONT font_noto_sans_basic_16_4)
-    set(BUILTIN_ICON_FONT font_material_symbols_16_4)
-    set(DEFAULT_EMOJI_COLLECTION noto-color-emoji_64)
+    # This board renders fixed eye bitmaps and has no text/icon/emoji UI.
+    set(BUILTIN_TEXT_FONT "")
+    set(BUILTIN_ICON_FONT "")
+    set(DEFAULT_EMOJI_COLLECTION "")
 elseif(CONFIG_BOARD_TYPE_BREAD_COMPACT_WIFI)
     set(BOARD_DIR "bread-compact-wifi")
     set(BUILTIN_TEXT_FONT font_noto_sans_basic_14_1)
@@ -884,6 +885,19 @@ file(GLOB BOARD_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/boards/${BOARD_DIR}/*.cc
     ${CMAKE_CURRENT_SOURCE_DIR}/boards/${BOARD_DIR}/*.c
 )
+set(BOARD_EMBED_FILES "")
+if(CONFIG_BOARD_TYPE_AI_DUAL_EYED_DOLL)
+    file(GLOB AI_DUAL_EYE_COMMON_SOURCES
+        ${CMAKE_CURRENT_SOURCE_DIR}/boards/${BOARD_DIR}/common/*.cc
+        ${CMAKE_CURRENT_SOURCE_DIR}/boards/${BOARD_DIR}/common/*.c
+    )
+    list(APPEND BOARD_SOURCES ${AI_DUAL_EYE_COMMON_SOURCES})
+    list(APPEND INCLUDE_DIRS ${CMAKE_CURRENT_SOURCE_DIR}/boards/${BOARD_DIR})
+    file(GLOB BOARD_EMBED_FILES
+        ${CMAKE_CURRENT_SOURCE_DIR}/boards/${BOARD_DIR}/assets/*.rgb565.z
+        ${CMAKE_CURRENT_SOURCE_DIR}/boards/${BOARD_DIR}/assets/*.ogg
+    )
+endif()
 list(APPEND SOURCES ${BOARD_SOURCES})
 
 # Select one audio engine for each chip family
@@ -1066,7 +1080,7 @@ if(CONFIG_BOARD_TYPE_ESP32_P4_FUNCTION_EV_BOARD)
     )
 endif()
 idf_component_register(SRCS ${SOURCES}
-                    EMBED_FILES ${LANG_SOUNDS} ${COMMON_SOUNDS}
+                    EMBED_FILES ${LANG_SOUNDS} ${COMMON_SOUNDS} ${BOARD_EMBED_FILES}
                     INCLUDE_DIRS ${INCLUDE_DIRS}
                     WHOLE_ARCHIVE
                     PRIV_REQUIRES
@@ -1105,19 +1119,31 @@ if(NOT CMAKE_BUILD_EARLY_EXPANSION AND NOT BOARD_NAME MATCHES "^[a-z0-9.-]+$")
         "Invalid BOARD_NAME '${BOARD_NAME}': only lowercase letters, digits, '.' and '-' are allowed"
     )
 endif()
-string(REGEX MATCH "^font_noto_sans_basic_([0-9]+)_([0-9]+)$" _font_match "${BUILTIN_TEXT_FONT}")
-if(NOT _font_match)
-    message(FATAL_ERROR "Unsupported built-in text font name: ${BUILTIN_TEXT_FONT}")
+set(TEXT_FONT_SIZE 0)
+set(TEXT_FONT_BPP 0)
+set(MAIN_COMPILE_DEFINITIONS
+    BOARD_TYPE="${BOARD_TYPE}"
+    BOARD_NAME="${BOARD_NAME}"
+    BOARD_MANUFACTURER="${BOARD_MANUFACTURER}"
+)
+if(BUILTIN_TEXT_FONT)
+    string(REGEX MATCH "^font_noto_sans_basic_([0-9]+)_([0-9]+)$" _font_match "${BUILTIN_TEXT_FONT}")
+    if(NOT _font_match)
+        message(FATAL_ERROR "Unsupported built-in text font name: ${BUILTIN_TEXT_FONT}")
+    endif()
+    set(TEXT_FONT_SIZE "${CMAKE_MATCH_1}")
+    set(TEXT_FONT_BPP "${CMAKE_MATCH_2}")
+    list(APPEND MAIN_COMPILE_DEFINITIONS
+        BUILTIN_TEXT_FONT=${BUILTIN_TEXT_FONT}
+        BUILTIN_ICON_FONT=${BUILTIN_ICON_FONT}
+        TEXT_FONT_SIZE=${TEXT_FONT_SIZE}
+        TEXT_FONT_BPP=${TEXT_FONT_BPP}
+    )
+else()
+    list(APPEND MAIN_COMPILE_DEFINITIONS TEXT_FONT_SIZE=0 TEXT_FONT_BPP=0)
 endif()
-set(TEXT_FONT_SIZE "${CMAKE_MATCH_1}")
-set(TEXT_FONT_BPP "${CMAKE_MATCH_2}")
 if(NOT CMAKE_BUILD_EARLY_EXPANSION)
-    target_compile_definitions(${COMPONENT_LIB}
-                        PRIVATE BOARD_TYPE=\"${BOARD_TYPE}\" BOARD_NAME=\"${BOARD_NAME}\"
-                        PRIVATE BOARD_MANUFACTURER=\"${BOARD_MANUFACTURER}\"
-                        PRIVATE BUILTIN_TEXT_FONT=${BUILTIN_TEXT_FONT} BUILTIN_ICON_FONT=${BUILTIN_ICON_FONT}
-                        PRIVATE TEXT_FONT_SIZE=${TEXT_FONT_SIZE} TEXT_FONT_BPP=${TEXT_FONT_BPP}
-                        )
+    target_compile_definitions(${COMPONENT_LIB} PRIVATE ${MAIN_COMPILE_DEFINITIONS})
 endif()
 
 # Add generation rules

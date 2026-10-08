@@ -8,7 +8,7 @@ AI 双眼玩偶开发板，基于 ESP32-S3R8。
 - ES8390 音频 Codec（复用 ES8389 驱动），两个模拟麦克风和一个扬声器
 - KEY_ON 电源按键、KEY_1 对话按键
 - 两路 TTP233H 电容触摸
-- 4MB Flash 和片内 Octal PSRAM
+- 16MB Flash 和片内 Octal PSRAM
 
 GPIO33～GPIO37 由 PSRAM 占用，不用于普通外设。Touch_out3、Touch_out4 和 KEY_2 均不启用；硬件改板后 PA_SD 使用 GPIO18，R44 已去除。
 

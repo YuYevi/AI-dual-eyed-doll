@@ -1,6 +1,9 @@
 #include "wifi_board.h"
 
 #include <driver/gpio.h>
+#include <driver/ledc.h>
+#include <memory>
+#include <atomic>
 #include <driver/i2c_master.h>
 #include <driver/rtc_io.h>
 #include <driver/spi_common.h>
@@ -16,15 +19,16 @@
 #include <string_view>
 #include <wifi_manager.h>
 
-#include "adc_battery_monitor.h"
+#include "power_manager.h"
 #include "application.h"
 #include "audio_codec.h"
 #include "board.h"
-#include "common/board_sounds.h"
+#include "board_sounds.h"
 #include "button.h"
-#include "codecs/es8389_audio_codec.h"
+#include "doll_audio_codec.h"
+
 #include "config.h"
-#include "common/dual_eye_display.h"
+#include "dual_eye_display.h"
 #include "esp_lcd_gc9d01.h"
 
 #define TAG "AiDualEyedDoll"
@@ -88,25 +92,119 @@ class AiDualEyedDollBoard : public WifiBoard {
 private:
     i2c_master_bus_handle_t i2c_bus_ = nullptr;
     DualEyeDisplay* display_ = nullptr;
-    AdcBatteryMonitor* battery_monitor_ = nullptr;
-    Button key1_button_;
-    Button pwr_button_;
-    Button touch1_button_;
-    Button touch2_button_;
+    PowerManager* battery_monitor_ = nullptr;
+    std::unique_ptr<Button> key1_button_, key2_button_, pwr_button_, touch1_button_, touch2_button_;
     bool screen_on_ = true;
     bool power_button_released_ = false;
+    bool power_press_accepted_ = false;
+    std::atomic<bool> shutting_down_{false};
+    AudioCodec* codec_ = nullptr;
+
+    static void ConfigureOutput(gpio_num_t pin, int level) {
+        // Set the latch before enabling the output to avoid an active pulse.
+        ESP_ERROR_CHECK(gpio_set_level(pin, level));
+        ESP_ERROR_CHECK(gpio_set_direction(pin, GPIO_MODE_OUTPUT));
+    }
+
+    void InitializePowerOff() {
+        gpio_deep_sleep_hold_dis();
+        // Preload OFF levels before releasing retained GPIO output levels.
+        for (auto pin : {POWER_EN1_GPIO, POWER_EN2_GPIO, AUDIO_PA_ENABLE_GPIO,
+                         DISPLAY_BACKLIGHT_PIN, RUN_LED_GPIO}) {
+            gpio_set_level(pin, pin == POWER_EN1_GPIO ? 1 : 0);
+            rtc_gpio_set_level(pin, pin == POWER_EN1_GPIO ? 1 : 0);
+            gpio_hold_dis(pin);
+            rtc_gpio_hold_dis(pin);
+            rtc_gpio_deinit(pin);
+        }
+        ConfigureOutput(POWER_EN1_GPIO, 1);
+        ConfigureOutput(POWER_EN2_GPIO, 0);
+        ConfigureOutput(AUDIO_PA_ENABLE_GPIO, 0);
+        ConfigureOutput(DISPLAY_BACKLIGHT_PIN, DISPLAY_BACKLIGHT_OFF_LEVEL);
+        ConfigureOutput(RUN_LED_GPIO, 0);
+        rtc_gpio_hold_dis(PWR_BUTTON_GPIO);
+        rtc_gpio_deinit(PWR_BUTTON_GPIO);
+        gpio_config_t key = {};
+        key.pin_bit_mask = 1ULL << PWR_BUTTON_GPIO;
+        key.mode = GPIO_MODE_INPUT;
+        // Q3 drives HIGH on press; external R53 supplies the released LOW level.
+        key.pull_up_en = GPIO_PULLUP_DISABLE;
+        key.pull_down_en = GPIO_PULLDOWN_DISABLE;
+        ESP_ERROR_CHECK(gpio_config(&key));
+        // Keep unpowered peripheral inputs low during startup qualification.
+        for (auto pin : {DISPLAY_SPI_SCLK_GPIO, DISPLAY_SPI_MOSI_GPIO, DISPLAY_SPI_DC_GPIO,
+                         DISPLAY_SPI_RST_GPIO, DISPLAY_1_SPI_CS_GPIO, DISPLAY_2_SPI_CS_GPIO,
+                         AUDIO_I2S_GPIO_MCLK, AUDIO_I2S_GPIO_BCLK, AUDIO_I2S_GPIO_WS,
+                         AUDIO_I2S_GPIO_DOUT, AUDIO_I2S_GPIO_DIN, I2C_SDA_IO, I2C_SCL_IO}) {
+            gpio_hold_dis(pin);
+            if (rtc_gpio_is_valid_gpio(pin)) {
+                rtc_gpio_hold_dis(pin);
+                rtc_gpio_deinit(pin);
+            }
+            ESP_ERROR_CHECK(gpio_reset_pin(pin));
+            ConfigureOutput(pin, 0);
+        }
+    }
 
     void ConfigureWakeAndPowerOff() {
-        rtc_gpio_init(PWR_BUTTON_GPIO);
-        rtc_gpio_set_direction(PWR_BUTTON_GPIO, RTC_GPIO_MODE_INPUT_ONLY);
-        rtc_gpio_pullup_en(PWR_BUTTON_GPIO);
-        rtc_gpio_pulldown_dis(PWR_BUTTON_GPIO);
-        ESP_ERROR_CHECK(esp_sleep_enable_ext0_wakeup(PWR_BUTTON_GPIO, 0));
+        // ext0 is level-triggered: qualify a stable release BEFORE arming active-level wake.
+        int released_samples = 0;
+        while (released_samples < 5) {
+            released_samples = gpio_get_level(PWR_BUTTON_GPIO) != POWER_BUTTON_ACTIVE_LEVEL
+                                   ? released_samples + 1 : 0;
+            vTaskDelay(pdMS_TO_TICKS(POWER_BUTTON_POLL_MS));
+        }
+        ESP_ERROR_CHECK(esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_ALL));
+        ESP_ERROR_CHECK(rtc_gpio_init(PWR_BUTTON_GPIO));
+        ESP_ERROR_CHECK(rtc_gpio_set_direction(PWR_BUTTON_GPIO, RTC_GPIO_MODE_INPUT_ONLY));
+        // Keep both RTC pulls disabled; external R53 defines the released level.
+        ESP_ERROR_CHECK(rtc_gpio_pullup_dis(PWR_BUTTON_GPIO));
+        ESP_ERROR_CHECK(rtc_gpio_pulldown_dis(PWR_BUTTON_GPIO));
+        ESP_ERROR_CHECK(esp_sleep_enable_ext0_wakeup(PWR_BUTTON_GPIO, POWER_BUTTON_ACTIVE_LEVEL));
 
-        rtc_gpio_init(PWR_CONTROL_GPIO);
-        rtc_gpio_set_direction(PWR_CONTROL_GPIO, RTC_GPIO_MODE_OUTPUT_ONLY);
-        rtc_gpio_hold_dis(PWR_CONTROL_GPIO);
-        rtc_gpio_set_level(PWR_CONTROL_GPIO, 0);
+        // Retain low signal levels before disabling either peripheral rail.
+        // Holds prevent background SPI/I2S activity from changing pad levels.
+        // Keep the scheduler running until IDF performs its sleep shutdown.
+        for (auto pin : {DISPLAY_SPI_SCLK_GPIO, DISPLAY_SPI_MOSI_GPIO, DISPLAY_SPI_DC_GPIO,
+                         DISPLAY_SPI_RST_GPIO, DISPLAY_1_SPI_CS_GPIO, DISPLAY_2_SPI_CS_GPIO,
+                         AUDIO_I2S_GPIO_MCLK, AUDIO_I2S_GPIO_BCLK, AUDIO_I2S_GPIO_WS,
+                         AUDIO_I2S_GPIO_DOUT, AUDIO_I2S_GPIO_DIN}) {
+            gpio_reset_pin(pin); // Detach SPI/I2S peripheral output matrix.
+            gpio_set_pull_mode(pin, GPIO_FLOATING);
+            gpio_set_level(pin, 0);
+            gpio_set_direction(pin, GPIO_MODE_OUTPUT);
+            // Only RTC-capable pins can be retained by RTC hold (I2S pins are not).
+            if (rtc_gpio_is_valid_gpio(pin)) {
+                rtc_gpio_init(pin);
+                rtc_gpio_set_direction(pin, RTC_GPIO_MODE_OUTPUT_ONLY);
+                rtc_gpio_pullup_dis(pin);
+                rtc_gpio_pulldown_dis(pin);
+                rtc_gpio_set_level(pin, 0);
+                rtc_gpio_hold_en(pin);
+            } else {
+                gpio_hold_en(pin);
+            }
+        }
+        // Shared I2C pull-ups remain on MCU 3V3. Drive the bus low to avoid
+        // feeding the disabled codec rail through its input protection diodes.
+        for (auto pin : {I2C_SDA_IO, I2C_SCL_IO}) {
+            rtc_gpio_init(pin);
+            rtc_gpio_set_direction(pin, RTC_GPIO_MODE_OUTPUT_ONLY);
+            rtc_gpio_pullup_dis(pin);
+            rtc_gpio_pulldown_dis(pin);
+            rtc_gpio_set_level(pin, 0);
+            rtc_gpio_hold_en(pin);
+        }
+        for (auto pin : {AUDIO_PA_ENABLE_GPIO, DISPLAY_BACKLIGHT_PIN, RUN_LED_GPIO,
+                         POWER_EN1_GPIO, POWER_EN2_GPIO}) {
+            rtc_gpio_init(pin);
+            rtc_gpio_set_direction(pin, RTC_GPIO_MODE_OUTPUT_ONLY);
+            rtc_gpio_set_level(pin, pin == POWER_EN1_GPIO ? 1 : 0);
+            rtc_gpio_hold_en(pin);
+        }
+        gpio_deep_sleep_hold_en();
+        ESP_LOGI(TAG, "Deep sleep: KEY_ON GPIO%d wake level=%d",
+                 static_cast<int>(PWR_BUTTON_GPIO), POWER_BUTTON_ACTIVE_LEVEL);
         esp_deep_sleep_start();
     }
 
@@ -117,26 +215,27 @@ private:
 #else
         const bool ext0_wakeup = esp_sleep_get_wakeup_cause() == ESP_SLEEP_WAKEUP_EXT0;
 #endif
-        if (reset_reason != ESP_RST_POWERON && !ext0_wakeup) {
-            return true;
-        }
-
+        // Software reset, watchdog reset and download/reset can boot normally.
+        if (reset_reason != ESP_RST_POWERON && !ext0_wakeup) return true;
         ESP_LOGI(TAG, "Hold power button for %d ms to power on", POWER_BUTTON_HOLD_MS);
-        const int64_t start_time = esp_timer_get_time();
-        while (esp_timer_get_time() - start_time < POWER_BUTTON_HOLD_MS * 1000LL) {
-            if (gpio_get_level(PWR_BUTTON_GPIO) != 0) {
-                ESP_LOGI(TAG, "Power button released before startup qualification");
+        const int64_t start = esp_timer_get_time();
+        while (esp_timer_get_time() - start < POWER_BUTTON_HOLD_MS * 1000LL) {
+            if (gpio_get_level(PWR_BUTTON_GPIO) != POWER_BUTTON_ACTIVE_LEVEL) {
+                ESP_LOGI(TAG, "Power-on cancelled: KEY_ON released before %d ms", POWER_BUTTON_HOLD_MS);
                 return false;
             }
             vTaskDelay(pdMS_TO_TICKS(POWER_BUTTON_POLL_MS));
         }
-        return gpio_get_level(PWR_BUTTON_GPIO) == 0;
+        const bool pressed = gpio_get_level(PWR_BUTTON_GPIO) == POWER_BUTTON_ACTIVE_LEVEL;
+        if (!pressed) ESP_LOGI(TAG, "Power-on cancelled: KEY_ON released at hold completion");
+        return pressed;
     }
 
-    void HoldPower() {
-        rtc_gpio_init(PWR_CONTROL_GPIO);
-        rtc_gpio_set_direction(PWR_CONTROL_GPIO, RTC_GPIO_MODE_OUTPUT_ONLY);
-        rtc_gpio_set_level(PWR_CONTROL_GPIO, 1);
+    void EnablePeripheralPower() {
+        ConfigureOutput(POWER_EN1_GPIO, 0);
+        ConfigureOutput(POWER_EN2_GPIO, 1);
+        ConfigureOutput(RUN_LED_GPIO, 1);
+        vTaskDelay(pdMS_TO_TICKS(50));
     }
 
     void SetScreenOn(bool on) {
@@ -158,12 +257,17 @@ private:
     }
 
     void Shutdown() {
-        ESP_LOGI(TAG, "Power off");
+        ESP_LOGI(TAG, "Power off: release KEY_ON to enter deep sleep");
         SetScreenOn(false);
-        auto codec = GetAudioCodec();
-        if (codec != nullptr) {
-            codec->EnableOutput(false);
+        Application::GetInstance().GetAudioService().Stop();
+        if (codec_) {
+            codec_->EnableOutput(false);
+            codec_->EnableInput(false);
         }
+        // Allow the asynchronous backlight fade to finish, then disconnect PWM.
+        vTaskDelay(pdMS_TO_TICKS(550));
+        ledc_stop(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0, DISPLAY_BACKLIGHT_OFF_LEVEL);
+        ConfigureOutput(AUDIO_PA_ENABLE_GPIO, 0);
         ConfigureWakeAndPowerOff();
     }
 
@@ -202,6 +306,25 @@ private:
                 },
         };
         ESP_ERROR_CHECK(i2c_new_master_bus(&i2c_bus_cfg, &i2c_bus_));
+    }
+
+    void InitializeTca9554() {
+        const auto probe = i2c_master_probe(i2c_bus_, TCA9554_I2C_ADDRESS, 100);
+        if (probe != ESP_OK) {
+            ESP_LOGW(TAG, "TCA9554 probe 0x20 failed: %s", esp_err_to_name(probe));
+            return;
+        }
+        i2c_device_config_t cfg = {};
+        cfg.dev_addr_length = I2C_ADDR_BIT_LEN_7;
+        cfg.device_address = TCA9554_I2C_ADDRESS;
+        cfg.scl_speed_hz = 100000;
+        i2c_master_dev_handle_t device = nullptr;
+        ESP_ERROR_CHECK(i2c_master_bus_add_device(i2c_bus_, &cfg, &device));
+        const uint8_t inputs[] = {0x03, 0xFF}; // Configuration: all eight pins input.
+        const auto result = i2c_master_transmit(device, inputs, sizeof(inputs), 100);
+        ESP_ERROR_CHECK(i2c_master_bus_rm_device(device));
+        ESP_ERROR_CHECK(result);
+        ESP_LOGI(TAG, "TCA9554 0x20: all ports input (IMU/SD not populated)");
     }
 
     void InitializeSpi() {
@@ -272,43 +395,55 @@ private:
     }
 
     void InitializeButtons() {
-        // TTP233H 的 TOG 脚置高，输出每次触摸都会翻转；两个边沿都代表一次新触摸。
-        touch1_button_.OnPressDown([]() { PlayTouchReaction("happy", BoardSounds::OGG_SHORT_LAUGH); });
-        touch1_button_.OnPressUp([]() { PlayTouchReaction("happy", BoardSounds::OGG_SHORT_LAUGH); });
-        touch2_button_.OnPressDown([]() { PlayTouchReaction("angry", BoardSounds::OGG_TSUNDERE); });
-        touch2_button_.OnPressUp([]() { PlayTouchReaction("angry", BoardSounds::OGG_TSUNDERE); });
-
-        pwr_button_.OnPressUp([this]() { power_button_released_ = true; });
-        pwr_button_.OnClick([this]() { SetScreenOn(!screen_on_); });
-        pwr_button_.OnLongPress([this]() {
-            if (!power_button_released_) {
-                ESP_LOGI(TAG, "Ignore power long press held from boot");
-                return;
-            }
+        key1_button_ = std::make_unique<Button>(KEY_1_GPIO, false, 2000);
+        key2_button_ = std::make_unique<Button>(KEY_2_GPIO, false, 2000);
+        pwr_button_ = std::make_unique<Button>(PWR_BUTTON_GPIO, POWER_BUTTON_ACTIVE_LEVEL == 1, POWER_BUTTON_HOLD_MS);
+        // Button enables an internal pull by default; this board uses external R53.
+        ESP_ERROR_CHECK(gpio_set_pull_mode(PWR_BUTTON_GPIO, GPIO_FLOATING));
+        touch1_button_ = std::make_unique<Button>(TOUCH_1_GPIO, TOUCH_ACTIVE_HIGH);
+        touch2_button_ = std::make_unique<Button>(TOUCH_2_GPIO, TOUCH_ACTIVE_HIGH);
+        // Assembled TOG is grounded: releases must not produce a second reaction.
+        touch1_button_->OnPressDown([this]() {
+            if (!shutting_down_) PlayTouchReaction("happy", BoardSounds::OGG_SHORT_LAUGH);
+        });
+        touch2_button_->OnPressDown([this]() {
+            if (!shutting_down_) PlayTouchReaction("angry", BoardSounds::OGG_TSUNDERE);
+        });
+        power_button_released_ = gpio_get_level(PWR_BUTTON_GPIO) != POWER_BUTTON_ACTIVE_LEVEL;
+        pwr_button_->OnPressDown([this]() { power_press_accepted_ = power_button_released_; });
+        pwr_button_->OnPressUp([this]() { power_button_released_ = true; });
+        pwr_button_->OnClick([this]() {
+            if (!power_press_accepted_ || shutting_down_) return;
+            Application::GetInstance().Schedule([this]() {
+                if (!shutting_down_) SetScreenOn(!screen_on_);
+            });
+        });
+        pwr_button_->OnLongPress([this]() {
+            // Ignore the initial startup hold until a release and a fresh press.
+            if (!power_press_accepted_ || shutting_down_.exchange(true)) return;
             Application::GetInstance().Schedule([this]() { Shutdown(); });
         });
-        power_button_released_ = gpio_get_level(PWR_BUTTON_GPIO) != 0;
-
-        key1_button_.OnClick([]() { Application::GetInstance().ToggleChatState(); });
-        key1_button_.OnLongPress([this]() { ToggleWifiConfig(); });
+        key1_button_->OnClick([this]() {
+            Application::GetInstance().Schedule([this]() {
+                if (!shutting_down_) Application::GetInstance().ToggleChatState();
+            });
+        });
+        key1_button_->OnLongPress([this]() {
+            Application::GetInstance().Schedule([this]() { if (!shutting_down_) ToggleWifiConfig(); });
+        });
+        key2_button_->OnClick([]() { ESP_LOGI(TAG, "KEY_2 click (reserved)"); });
+        key2_button_->OnLongPress([]() { ESP_LOGI(TAG, "KEY_2 long press (reserved)"); });
     }
 
-    void InitializeBattery() {
-        battery_monitor_ = new AdcBatteryMonitor(BATTERY_ADC_UNIT, BATTERY_ADC_CHANNEL,
-                                                 200000, 200000, CHARGE_STATUS_GPIO);
-    }
+    void InitializeBattery() { battery_monitor_ = new PowerManager(); }
 
 public:
-    AiDualEyedDollBoard()
-        : key1_button_(KEY_1_GPIO, false, 2000),
-          pwr_button_(PWR_BUTTON_GPIO, false, POWER_BUTTON_HOLD_MS),
-          touch1_button_(TOUCH_1_GPIO, true),
-          touch2_button_(TOUCH_2_GPIO, true) {
-        if (!QualifyPowerOn()) {
-            ConfigureWakeAndPowerOff();
-        }
-        HoldPower();
+    AiDualEyedDollBoard() {
+        InitializePowerOff();
+        if (!QualifyPowerOn()) ConfigureWakeAndPowerOff();
+        EnablePeripheralPower();
         InitializeI2c();
+        InitializeTca9554();
         InitializeSpi();
         InitializeEyes();
         InitializeButtons();
@@ -317,12 +452,9 @@ public:
     }
 
     virtual AudioCodec* GetAudioCodec() override {
-        static Es8389AudioCodec audio_codec(
-            i2c_bus_, I2C_NUM_0, AUDIO_INPUT_SAMPLE_RATE, AUDIO_OUTPUT_SAMPLE_RATE,
-            AUDIO_I2S_GPIO_MCLK, AUDIO_I2S_GPIO_BCLK, AUDIO_I2S_GPIO_WS, AUDIO_I2S_GPIO_DOUT,
-            AUDIO_I2S_GPIO_DIN, AUDIO_PA_ENABLE_GPIO, AUDIO_CODEC_I2C_ADDRESS, true,
-            AUDIO_INPUT_CHANNELS);
-        return &audio_codec;
+        static DollAudioCodec audio_codec(i2c_bus_, AUDIO_INPUT_SAMPLE_RATE, AUDIO_I2S_GPIO_MCLK, AUDIO_I2S_GPIO_BCLK, AUDIO_I2S_GPIO_WS, AUDIO_I2S_GPIO_DOUT, AUDIO_I2S_GPIO_DIN, AUDIO_PA_ENABLE_GPIO);
+        codec_ = &audio_codec;
+        return codec_;
     }
 
     virtual Display* GetDisplay() override { return display_; }
@@ -333,10 +465,8 @@ public:
     }
 
     virtual bool GetBatteryLevel(int& level, bool& charging, bool& discharging) override {
-        charging = battery_monitor_->IsCharging();
-        discharging = battery_monitor_->IsDischarging();
-        level = battery_monitor_->GetBatteryLevel();
-        return true;
+        if (shutting_down_ || !battery_monitor_) return false;
+        return battery_monitor_->GetStatus(level, charging, discharging);
     }
 };
 

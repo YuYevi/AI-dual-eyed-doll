@@ -44,7 +44,26 @@ python scripts/build.py ai-dual-eyed-doll
 
 使用原有 `partitions/v2/16m.csv`：NVS 为 16 KB（0x9000-0xCFFF），`otadata` 位于 0xD000。原始 NVS 备份为 `build/v02-original-nvs-COM33.bin`。
 
+当前双眼动画来自 `docs/资源` 中的左右眼 GIF，包含平静、开心、惊讶、生气、难过、困倦、害羞、害怕八种表情。`scripts/pack_dual_eye_assets.py` 将动画转换为 RGB565 压缩差分帧，打包到 `assets/dual_eye_assets.pack`，并保留语音唤醒模型。
+
+更换表情后必须烧录应用和 `assets` 分区，不能只烧录应用。构建会将资源包加入 `build/flash_args` 的 `0x800000` 项，可使用完整烧录命令：
+
+```bash
+idf.py -p COM33 flash
+```
+
+若启动日志出现 `dual_eye.anim is missing from the assets partition`，说明设备仍在使用旧资源分区，需要重新完整烧录。
+
 ## 验证记录
+
+2026-10-12 表情替换修复记录：
+
+- 从 COM33 读回的旧资源分区仅包含 `srmodels.bin` 和 `index.json`，启动日志报 `dual_eye.anim is missing from the assets partition`。
+- 新资源包的 1,932 个左右眼帧逐一解压、重建并与源 GIF 比对，RGB565 像素差异为 0。
+- ESP-IDF 5.5.4 完整编译通过，应用为 2,388,816 字节，资源包为 5,198,170 字节；已通过 COM33 完整烧录，全部写入段 Hash 校验通过。
+- 重启日志确认 `Emotion calm -> calm`，连续观察 35 秒未出现动画加载、解压、传输错误或崩溃。日志保存在 `build/dual_eye_flash.log` 和 `build/dual_eye_boot.log`。
+- 用户已现场确认两块屏幕正常显示新表情动画，花屏问题已解决。
+- 本地配置时使用进程级 `IDF_COMPONENT_CHECK_NEW_VERSION=0` 绕过组件管理器的新版本元数据检查问题，未更改组件清单或依赖锁文件。
 
 2026-10-10 实机记录：
 

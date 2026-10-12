@@ -7,7 +7,9 @@
             "sdkconfig_append": [
                 "CONFIG_PARTITION_TABLE_CUSTOM_FILENAME=\"partitions/v2/16m.csv\"",
                 "CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y",
-                "CONFIG_FLASH_NONE_ASSETS=y",
+                "CONFIG_FLASH_NONE_ASSETS=n",
+                "CONFIG_FLASH_CUSTOM_ASSETS=y",
+                "CONFIG_CUSTOM_ASSETS_FILE=\"boards/ai-dual-eyed-doll/assets/dual_eye_assets.pack\"",
                 "CONFIG_USE_DEVICE_AEC=y",
                 "CONFIG_ESP_MAIN_TASK_STACK_SIZE=16384"
             ]

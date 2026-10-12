@@ -895,7 +895,6 @@ if(CONFIG_BOARD_TYPE_AI_DUAL_EYED_DOLL)
     list(APPEND INCLUDE_DIRS ${CMAKE_CURRENT_SOURCE_DIR}/boards/${BOARD_DIR})
     list(APPEND INCLUDE_DIRS ${CMAKE_CURRENT_SOURCE_DIR}/boards/${BOARD_DIR}/common)
     file(GLOB BOARD_EMBED_FILES
-        ${CMAKE_CURRENT_SOURCE_DIR}/boards/${BOARD_DIR}/assets/*.rgb565.z
         ${CMAKE_CURRENT_SOURCE_DIR}/boards/${BOARD_DIR}/assets/*.ogg
     )
 endif()
@@ -1368,7 +1367,16 @@ partition_table_get_partition_info(size "--partition-name assets" "size")
 partition_table_get_partition_info(offset "--partition-name assets" "offset")
 if ("${size}" AND "${offset}")
     # Flash assets based on configuration
-    if(CONFIG_FLASH_DEFAULT_ASSETS)
+    if(CONFIG_BOARD_TYPE_AI_DUAL_EYED_DOLL)
+        # DualEyeDisplay requires this board's paired animations, including when
+        # building directly with idf.py rather than scripts/build.py.
+        set(ASSETS_LOCAL_FILE "${CMAKE_CURRENT_SOURCE_DIR}/boards/ai-dual-eyed-doll/assets/dual_eye_assets.pack")
+        if(NOT EXISTS "${ASSETS_LOCAL_FILE}")
+            message(FATAL_ERROR "Dual-eye animation assets not found: ${ASSETS_LOCAL_FILE}")
+        endif()
+        esptool_py_flash_to_partition(flash "assets" "${ASSETS_LOCAL_FILE}")
+        message(STATUS "Dual-eye animation assets: ${ASSETS_LOCAL_FILE} -> assets partition")
+    elseif(CONFIG_FLASH_DEFAULT_ASSETS)
         # Build default assets based on configuration
         build_default_assets_bin()
         esptool_py_flash_to_partition(flash "assets" "${GENERATED_ASSETS_LOCAL_FILE}")

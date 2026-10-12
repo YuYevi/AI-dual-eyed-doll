@@ -4,7 +4,7 @@
 
 ## 硬件状态
 
-- 双眼为两块 160x160、4 线 SPI GC9D01N 显示屏。
+- 双眼为两块 160x160、4 线 SPI GC9D01N 显示屏，均不使用水平镜像，分别显示左、右眼原始动画。
 - ES8311 output Codec and ES7210 input Codec; two analog microphones connect to ES7210 MIC1 and MIC2. MIC3 is the AEC playback loopback reference channel.
 - TCA9554 is populated. The two TTP233H touch outputs connect directly to ESP GPIO39/GPIO38; AHLB=0 and TOG=0, so they are active HIGH, not active low.
 - IMU 和 SD 未焊接。固件仅将 TCA9554 全部端口配置为输入，不依赖 IMU 或 SD。
@@ -29,11 +29,11 @@
 
 音频输入配置为三通道、24 kHz，启用设备端 AEC；MMR Codec 新增设备 AEC 24 kHz 支持。运行时会将输入重采样为 16 kHz 后交给语音处理。
 
-已确认的操作：
+固件操作映射：
 
 - 电源键：短按切换息屏/亮屏；长按 3 秒开机或关机。首次开机长按后的释放不会被当作关机操作。
 - KEY_1：短按切换 AI 对话状态；长按进入或退出配网。
-- KEY_2：短按和长按均保留，当前仅记录日志。
+- KEY_2：短按从当前表情切换到下一种动画，按平静 → 开心 → 惊讶 → 生气 → 难过 → 困倦 → 害羞 → 害怕 → 平静循环；长按仅记录日志。
 - Touch 1：按下显示开心表情并播放短笑声；Touch 2：按下显示生气表情并播放傲娇语音。TOG=0 时仅按下触发，不在释放时二次触发。
 
 ## 构建与分区
@@ -56,6 +56,13 @@ idf.py -p COM33 flash
 
 ## 验证记录
 
+2026-10-12 KEY_2 与屏幕方向调整记录：
+
+- KEY_2 单击从当前表情切换到下一种动画；右屏取消水平镜像，显示右眼原始动画。
+- ESP-IDF 5.5.4 编译通过，应用为 2,389,248 字节；已通过 COM33 完整烧录，全部五个写入段 Hash 校验通过。
+- 35 秒启动日志确认 `Emotion calm -> calm`，未出现动画错误或崩溃；日志记录了 8 次实际 KEY_2 单击，依次切换开心、惊讶、生气、难过、困倦、害羞、害怕并回到平静，完整循环通过实机串口验证。
+- 日志保存在 `build/key2_flash.log` 和 `build/key2_boot.log`。右屏取消镜像后的视觉方向仍待用户现场确认。
+
 2026-10-12 表情替换修复记录：
 
 - 从 COM33 读回的旧资源分区仅包含 `srmodels.bin` 和 `index.json`，启动日志报 `dual_eye.anim is missing from the assets partition`。
@@ -73,4 +80,33 @@ idf.py -p COM33 flash
 - 用户已确认双眼均能正常显示；这是本记录中唯一已确认的实体交互结果。
 - Wi-Fi can enter `Xiaozhi-CA31` provisioning. The old `wifi_provisioning` configuration store differs from the new program's Wi-Fi namespace; startup logs state that the new program has no saved Wi-Fi configuration, so it enters provisioning.
 
-尚未验证：AI 对话、AEC 与麦克风采集；声音品质；触摸、按键与电源切换；电池与充电；以及深度睡眠功耗。这些项目仍需人工实机测试。
+尚未验证：AI 对话、AEC 与麦克风采集；声音品质；触摸、其他按键与电源切换；电池与充电；以及深度睡眠功耗。这些项目仍需人工实机测试。
+
+## 启动花屏原因与修复（2026-10-12）
+
+本次处理的是开机先短暂出现花屏、随后正常播放的问题。此前资源分区修复解决的是动画资源缺失，并未保证启动阶段始终屏蔽未初始化的显存。
+
+根因是面板开启显示早于显存初始化，并伴随双屏共享 SPI 的片选时序错误：
+
+- `docs/原理图与外设手册/GC9D01N DataSheet V1.1.pdf` 第 120 页说明，上电时显存内容随机，软件复位和硬件复位都不会清空显存。第 115 页说明 `0x29`（Display ON）直接启用显存输出；第 114 页说明 `0x28`（Display OFF）屏蔽显存输出并插入空白画面。
+- 旧 `ai-dual-eyed-doll.cc` 的 `kGc9d01InitCommands` 在末尾发送 `0x29`，随后发送没有像素数据的 `0x2C`（Memory Write）。空的写显存命令不能清屏。旧 `CreateEyePanel()` 还会再次调用 `esp_lcd_panel_disp_on_off(..., true)`。左右面板都完成这一步后，`InitializeEyes()` 才构造 `DualEyeDisplay`，后者才清黑并加载平静动画首帧。因此随机显存已经先被送到显示输出。
+- 旧 `InitializePowerOff()` 为避免向断电外设反向供电，将两路 CS 都拉低；屏幕供电后却未先将它们拉高。初始化左屏时只注册了左屏的 SPI IO，右屏 CS 仍为有效低电平，右屏也会收到左屏的初始化命令。直到随后注册右屏 IO，这条非预期广播路径才消失。
+
+背光极性是正确的：GPIO8 低电平关闭 Q4，Q4 门极还有 R56 下拉；旧代码的正常路径也是首帧处理返回后才调用 `RestoreBrightness()` 渐亮。本次分析没有测量背光电气波形，不能据此断言背光提前亮起。代码和手册已确认的是未初始化显存被提前使能输出，以及另一屏片选未及时撤销。
+
+新启动时序如下：
+
+1. 屏幕上电时保持共享 RST 低电平、背光关闭；电源稳定后先将左右 CS 都拉高。
+2. 两屏执行一次共享硬件复位；每屏初始化不再重复软件复位，初始化表移除 `0x29` 和空的 `0x2C`，面板始终保持 Display OFF。
+3. 关闭显示时依次清黑左右完整显存，分别等待 SPI DMA 完成；加载平静动画并写入左右首帧，再分别等待 DMA 完成。
+4. 动画任务创建成功后才标记 `ready`。只有左右屏的 Display ON 都成功，才等待 40 ms，使控制器先扫描有效画面，再恢复背光。
+5. 缓冲区或同步对象分配、回调注册、资源校验、解压、像素传输、DMA 等待或任务创建失败时，不进入可开屏状态。任一 Display ON 失败时尝试关闭两屏，背光保持关闭。启动资源错误需要修复资源并重启，重新执行完整的显示初始化。
+
+本地已通过 20 项启动回归测试（1 项正常启动、19 项故障注入），使用实际 `dual_eye_display.cc` 配合主机模拟接口编译运行：覆盖 DMA 缓冲分配、两次同步对象创建、两次回调注册、四次像素写入及各自 DMA 超时、资源缺失或损坏、解压失败、任务创建失败，以及左右 Display ON 失败。测试验证首帧像素、DMA 完成顺序、开屏条件和失败分支，日志保存在 `build/startup_regression.log`。实体屏幕的启动显示效果由下述用户现场观察确认。
+
+构建与实机串口验证：
+
+- ESP-IDF 5.5.4 编译成功，应用为 2,389,968 字节；已通过 COM33 完整烧录，五个写入段的 Hash 校验均通过。
+- 启动日志时间为：1138 ms 两屏保持关闭并完成清黑 DMA；1468 ms 左右平静首帧 DMA 完成；1508 ms 两屏已开启并完成 40 ms 等待；1518 ms 调用恢复背光。时间取自 ESP-IDF 启动日志，验证了先完成显存初始化、再开屏、最后恢复背光的顺序。
+- 35 秒串口观察期间未出现动画错误或崩溃。烧录及启动日志分别保存在 `build/startup_flash.log` 和 `build/startup_boot.log`。
+- 用户已通过长按关机后重新开机现场确认：两块屏幕直接显示正常动画，没有启动马赛克；启动花屏问题已解决。

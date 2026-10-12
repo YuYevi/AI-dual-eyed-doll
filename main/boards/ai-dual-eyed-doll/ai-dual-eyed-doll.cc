@@ -84,8 +84,8 @@ static const gc9d01_lcd_init_cmd_t kGc9d01InitCommands[] = {
     {0xF3, (const uint8_t[]){0x47, 0xB4, 0x72, 0x34, 0x35, 0xDA}, 6, 0},
     {0x36, (const uint8_t[]){0x00}, 1, 0},
     {0x11, nullptr, 0, 200},
-    {0x29, nullptr, 0, 0},
-    {0x2C, nullptr, 0, 0},
+    // Leave scanning disabled until both eyes contain a complete first frame.
+    {0x28, nullptr, 0, 0},
 };
 
 class AiDualEyedDollBoard : public WifiBoard {
@@ -94,7 +94,7 @@ private:
     DualEyeDisplay* display_ = nullptr;
     PowerManager* battery_monitor_ = nullptr;
     std::unique_ptr<Button> key1_button_, key2_button_, pwr_button_, touch1_button_, touch2_button_;
-    bool screen_on_ = true;
+    bool screen_on_ = false;
     bool power_button_released_ = false;
     bool power_press_accepted_ = false;
     std::atomic<bool> shutting_down_{false};
@@ -236,21 +236,29 @@ private:
         ConfigureOutput(POWER_EN2_GPIO, 1);
         ConfigureOutput(RUN_LED_GPIO, 1);
         vTaskDelay(pdMS_TO_TICKS(50));
+        // Both controllers share SCLK/MOSI/DC. Deselect both while RESET is
+        // still held low, before either panel IO or SPI bus can send commands.
+        ConfigureOutput(DISPLAY_1_SPI_CS_GPIO, 1);
+        ConfigureOutput(DISPLAY_2_SPI_CS_GPIO, 1);
+        ESP_LOGI(TAG, "Screen power ready: backlight off, reset low, both CS high");
     }
 
     void SetScreenOn(bool on) {
         auto backlight = GetBacklight();
-        auto display = GetDisplay();
         if (on) {
-            if (display != nullptr) {
-                display->SetPowerSaveMode(false);
+            if (display_ == nullptr || !display_->SetScreenEnabled(true)) {
+                backlight->SetBrightness(0);
+                screen_on_ = false;
+                ESP_LOGE(TAG, "Screen startup incomplete; backlight stays off");
+                return;
             }
+            ESP_LOGI(TAG, "Both screens enabled with valid frames; restoring backlight");
             backlight->RestoreBrightness();
             screen_on_ = true;
         } else {
             backlight->SetBrightness(0);
-            if (display != nullptr) {
-                display->SetPowerSaveMode(true);
+            if (display_ != nullptr) {
+                display_->SetScreenEnabled(false);
             }
             screen_on_ = false;
         }
@@ -339,15 +347,10 @@ private:
     }
 
     void ResetEyes() {
-        gpio_config_t io_conf = {};
-        io_conf.pin_bit_mask = 1ULL << DISPLAY_SPI_RST_GPIO;
-        io_conf.mode = GPIO_MODE_OUTPUT;
-        gpio_config(&io_conf);
-        gpio_set_level(DISPLAY_SPI_RST_GPIO, 1);
+        // One shared hardware reset. Never release RESET before both CS are high.
+        ConfigureOutput(DISPLAY_SPI_RST_GPIO, 0);
         vTaskDelay(pdMS_TO_TICKS(50));
-        gpio_set_level(DISPLAY_SPI_RST_GPIO, 0);
-        vTaskDelay(pdMS_TO_TICKS(50));
-        gpio_set_level(DISPLAY_SPI_RST_GPIO, 1);
+        ESP_ERROR_CHECK(gpio_set_level(DISPLAY_SPI_RST_GPIO, 1));
         vTaskDelay(pdMS_TO_TICKS(120));
     }
 
@@ -374,11 +377,14 @@ private:
         panel_config.bits_per_pixel = 16;
         panel_config.vendor_config = &vendor_config;
         ESP_ERROR_CHECK(esp_lcd_new_panel_gc9d01(*io_out, &panel_config, panel_out));
-        ESP_ERROR_CHECK(esp_lcd_panel_reset(*panel_out));
+        // ResetEyes already reset both controllers together. The driver must
+        // not reset the shared line, nor issue a second software reset here.
+        ESP_ERROR_CHECK(esp_lcd_panel_disp_on_off(*panel_out, false));
         ESP_ERROR_CHECK(esp_lcd_panel_init(*panel_out));
         ESP_ERROR_CHECK(esp_lcd_panel_invert_color(*panel_out, DISPLAY_INVERT_COLOR));
         ESP_ERROR_CHECK(esp_lcd_panel_mirror(*panel_out, mirror_x, DISPLAY_MIRROR_Y));
-        ESP_ERROR_CHECK(esp_lcd_panel_disp_on_off(*panel_out, true));
+        ESP_ERROR_CHECK(esp_lcd_panel_disp_on_off(*panel_out, false));
+        ESP_LOGI(TAG, "Eye CS%d initialized with display off", static_cast<int>(cs_pin));
     }
 
     void InitializeEyes() {
@@ -390,7 +396,7 @@ private:
         esp_lcd_panel_handle_t left_panel = nullptr;
         esp_lcd_panel_handle_t right_panel = nullptr;
         CreateEyePanel(DISPLAY_1_SPI_CS_GPIO, false, &left_io, &left_panel);
-        CreateEyePanel(DISPLAY_2_SPI_CS_GPIO, true, &right_io, &right_panel);
+        CreateEyePanel(DISPLAY_2_SPI_CS_GPIO, false, &right_io, &right_panel);
         display_ = new DualEyeDisplay(left_io, left_panel, right_io, right_panel);
     }
 
@@ -431,7 +437,14 @@ private:
         key1_button_->OnLongPress([this]() {
             Application::GetInstance().Schedule([this]() { if (!shutting_down_) ToggleWifiConfig(); });
         });
-        key2_button_->OnClick([]() { ESP_LOGI(TAG, "KEY_2 click (reserved)"); });
+        key2_button_->OnClick([this]() {
+            if (shutting_down_) return;
+            Application::GetInstance().Schedule([this]() {
+                if (shutting_down_ || display_ == nullptr) return;
+                ESP_LOGI(TAG, "KEY_2 click: next animation");
+                display_->ShowNextAnimation();
+            });
+        });
         key2_button_->OnLongPress([]() { ESP_LOGI(TAG, "KEY_2 long press (reserved)"); });
     }
 
@@ -448,7 +461,7 @@ public:
         InitializeEyes();
         InitializeButtons();
         InitializeBattery();
-        GetBacklight()->RestoreBrightness();
+        SetScreenOn(true);
     }
 
     virtual AudioCodec* GetAudioCodec() override {

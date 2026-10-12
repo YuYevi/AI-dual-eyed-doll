@@ -78,7 +78,7 @@ DualEyeDisplay::DualEyeDisplay(esp_lcd_panel_io_handle_t left_io,
     decompressor_ = AllocateBuffer(sizeof(tinfl_decompressor), MALLOC_CAP_SPIRAM);
     if (frame_ == nullptr || left_state_ == nullptr || right_state_ == nullptr ||
         decode_buffer_ == nullptr || decompressor_ == nullptr || mutex_ == nullptr ||
-        flush_done_ == nullptr) {
+        flush_done_ == nullptr || left_panel_ == nullptr || right_panel_ == nullptr) {
         ESP_LOGE(TAG, "Failed to allocate animation buffers");
         return;
     }
@@ -88,22 +88,32 @@ DualEyeDisplay::DualEyeDisplay(esp_lcd_panel_io_handle_t left_io,
     const esp_lcd_panel_io_callbacks_t cbs = {
         .on_color_trans_done = OnFlushDone,
     };
-    ESP_ERROR_CHECK(esp_lcd_panel_io_register_event_callbacks(left_io, &cbs, this));
-    ESP_ERROR_CHECK(esp_lcd_panel_io_register_event_callbacks(right_io, &cbs, this));
+    if (esp_lcd_panel_io_register_event_callbacks(left_io, &cbs, this) != ESP_OK ||
+        esp_lcd_panel_io_register_event_callbacks(right_io, &cbs, this) != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to register eye transfer callbacks; screens stay off");
+        return;
+    }
 
     // The controller's RAM is undefined at power-on. Clear both eyes even if
     // an old or missing assets partition prevents animations from loading.
-    DrawFrame(left_state_, left_panel_);
-    DrawFrame(right_state_, right_panel_);
+    if (!DrawFrame(left_state_, left_panel_) || !DrawFrame(right_state_, right_panel_)) {
+        ESP_LOGE(TAG, "Failed to clear both eyes; screens stay off");
+        return;
+    }
+    ESP_LOGI(TAG, "Both eye GRAM cleared with display off (DMA complete)");
     if (!LoadAnimations() || !SelectAnimation("calm")) {
         ESP_LOGE(TAG, "Failed to load dual-eye animations; flash the board's assets partition");
+        return;
     }
 
     if (xTaskCreate(AnimationTaskEntry, "dual_eye_anim", 4096, this, 4, &animation_task_) !=
         pdPASS) {
         ESP_LOGE(TAG, "Failed to create animation task");
         animation_task_ = nullptr;
+        return;
     }
+    ready_ = true;
+    ESP_LOGI(TAG, "Startup ready: both calm first frames transferred (DMA complete)");
 }
 
 DualEyeDisplay::~DualEyeDisplay() {
@@ -249,6 +259,7 @@ bool DualEyeDisplay::LoadAnimations() {
 
 bool DualEyeDisplay::SelectAnimation(const char* emotion) {
     const char* mapped = MapEmotion(emotion);
+    const char* previous = current_emotion_ != nullptr ? current_emotion_ : "(none)";
     for (size_t i = 0; i < animation_count_; ++i) {
         if (strcmp(animations_[i].name, mapped) == 0) {
             animation_ = &animations_[i];
@@ -261,7 +272,7 @@ bool DualEyeDisplay::SelectAnimation(const char* emotion) {
             }
             animation_frame_ = 1;
             current_emotion_ = animation_->name;
-            ESP_LOGI(TAG, "Emotion %s -> %s", emotion != nullptr ? emotion : "(null)", mapped);
+            ESP_LOGI(TAG, "Animation switched: %s -> %s", previous, current_emotion_);
             return true;
         }
     }
@@ -373,7 +384,7 @@ void DualEyeDisplay::AnimationTask() {
         if (!Lock(20)) {
             continue;
         }
-        if (animation_ != nullptr) {
+        if (screen_enabled_ && animation_ != nullptr) {
             if (animation_frame_ >= animation_->frame_count) {
                 animation_frame_ = 0;
                 memset(left_state_, 0, EYE_BYTES);
@@ -433,12 +444,8 @@ const char* DualEyeDisplay::MapEmotion(const char* emotion) {
 
 void DualEyeDisplay::SetEmotion(const char* emotion) {
     DisplayLockGuard lock(this);
-    if (frame_ == nullptr || left_state_ == nullptr || right_state_ == nullptr ||
+    if (!ready_ || frame_ == nullptr || left_state_ == nullptr || right_state_ == nullptr ||
         decode_buffer_ == nullptr || decompressor_ == nullptr || flush_done_ == nullptr) {
-        return;
-    }
-    // Assets may have been installed during activation after display startup.
-    if (animation_count_ == 0 && !LoadAnimations()) {
         return;
     }
     const char* mapped = MapEmotion(emotion);
@@ -447,6 +454,25 @@ void DualEyeDisplay::SetEmotion(const char* emotion) {
         return;
     }
     SelectAnimation(mapped);
+}
+
+void DualEyeDisplay::ShowNextAnimation() {
+    DisplayLockGuard lock(this);
+    if (!ready_ || frame_ == nullptr || left_state_ == nullptr || right_state_ == nullptr ||
+        decode_buffer_ == nullptr || decompressor_ == nullptr || mutex_ == nullptr ||
+        flush_done_ == nullptr || left_panel_ == nullptr || right_panel_ == nullptr) {
+        return;
+    }
+
+    size_t next_index = 0;
+    for (size_t i = 0; i < animation_count_; ++i) {
+        if (animation_ == &animations_[i]) {
+            next_index = (i + 1) % animation_count_;
+            break;
+        }
+    }
+    // SelectAnimation resets the XOR frame state and draws the new first frame.
+    SelectAnimation(animations_[next_index].name);
 }
 
 void DualEyeDisplay::SetStatus(const char* status) { ESP_LOGD(TAG, "SetStatus: %s", status); }
@@ -459,12 +485,36 @@ void DualEyeDisplay::ShowNotification(const char* notification, int duration_ms)
     ESP_LOGD(TAG, "Notify (%d ms): %s", duration_ms, notification);
 }
 
-void DualEyeDisplay::SetPowerSaveMode(bool on) {
+bool DualEyeDisplay::SetScreenEnabled(bool enabled) {
     DisplayLockGuard lock(this);
-    if (left_panel_ != nullptr) {
-        esp_lcd_panel_disp_on_off(left_panel_, !on);
+    if (enabled && !ready_) {
+        ESP_LOGE(TAG, "Refusing to enable screens before startup frames are ready");
+        return false;
     }
-    if (right_panel_ != nullptr) {
-        esp_lcd_panel_disp_on_off(right_panel_, !on);
+    if (left_panel_ == nullptr || right_panel_ == nullptr) {
+        return false;
     }
+    // Keep the animation task paused until both display-on commands succeed.
+    screen_enabled_ = false;
+    const auto left_error = esp_lcd_panel_disp_on_off(left_panel_, enabled);
+    const auto right_error = esp_lcd_panel_disp_on_off(right_panel_, enabled);
+    if (left_error != ESP_OK || right_error != ESP_OK) {
+        esp_lcd_panel_disp_on_off(left_panel_, false);
+        esp_lcd_panel_disp_on_off(right_panel_, false);
+        ESP_LOGE(TAG, "Failed to %s eyes: left=%s right=%s; screens stay off",
+                 enabled ? "enable" : "disable", esp_err_to_name(left_error),
+                 esp_err_to_name(right_error));
+        return false;
+    }
+    if (enabled) {
+        // Let the controller scan a complete valid frame before lighting it.
+        vTaskDelay(pdMS_TO_TICKS(ANIMATION_FRAME_INTERVAL_MS));
+        screen_enabled_ = true;
+        ESP_LOGI(TAG, "Both eye displays on after completed startup frames");
+    }
+    return true;
+}
+
+void DualEyeDisplay::SetPowerSaveMode(bool on) {
+    SetScreenEnabled(!on);
 }

@@ -29,6 +29,9 @@ public:
     ~DualEyeDisplay() override;
 
     void SetEmotion(const char* emotion) override;
+    void ShowNextAnimation();
+    bool IsReady() const { return ready_; }
+    bool SetScreenEnabled(bool enabled);
     void SetStatus(const char* status) override;
     void SetChatMessage(const char* role, const char* content) override;
     void ShowNotification(const char* notification, int duration_ms = 3000) override;
@@ -67,6 +70,8 @@ private:
     SemaphoreHandle_t mutex_ = nullptr;
     SemaphoreHandle_t flush_done_ = nullptr;
     bool flush_pending_ = false;
+    bool ready_ = false;
+    bool screen_enabled_ = false;
     const char* current_emotion_ = nullptr;
 };
 

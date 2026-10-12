@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Pack dual-eye GIF animations into a compact frame-delta asset."""
+"""Pack one GIF stream per expression for two mirrored eye displays."""
 from __future__ import annotations
 
 import argparse, hashlib, json, struct, subprocess, zlib
@@ -8,9 +8,9 @@ from pathlib import Path
 WIDTH = HEIGHT = 160
 FPS = 25
 MAGIC = b"DEYEANIM"
-VERSION = 1
+VERSION = 2
 EMOTIONS = ("calm", "happy", "surprised", "angry", "sad", "sleepy", "shy", "scared")
-TABLE = struct.Struct("<12sHHIIII")
+TABLE = struct.Struct("<12sHHII")
 HEADER = struct.Struct("<8sHHII")
 ASSET_TABLE = struct.Struct("<32sIIHH")
 FRAME_HEADER = struct.Struct("<I")
@@ -89,18 +89,12 @@ def main() -> None:
     args = parser.parse_args()
     streams: dict[bytes, bytes] = {}
     records = []
-    for emotion in EMOTIONS:
-        left = decode(args.input / f"{EMOTIONS.index(emotion)+1:02d}_{emotion}_L.gif")
-        right = decode(args.input / f"{EMOTIONS.index(emotion)+1:02d}_{emotion}_R.gif")
-        if len(left) != len(right):
-            raise ValueError(f"{emotion}: left/right frame count differs")
-        left_stream = pack_stream(left)
-        right_stream = pack_stream(right)
-        left_key = hashlib.sha256(left_stream).digest()
-        right_key = hashlib.sha256(right_stream).digest()
-        streams.setdefault(left_key, left_stream)
-        streams.setdefault(right_key, right_stream)
-        records.append((emotion.encode(), len(left), left_key, right_key))
+    for index, emotion in enumerate(EMOTIONS, start=1):
+        frames = decode(args.input / f"{index:02d}_{emotion}_L.gif")
+        stream = pack_stream(frames)
+        key = hashlib.sha256(stream).digest()
+        streams.setdefault(key, stream)
+        records.append((emotion.encode(), len(frames), key))
     header_size = HEADER.size + TABLE.size * len(records)
     offsets = {}
     cursor = header_size
@@ -109,11 +103,10 @@ def main() -> None:
         cursor += len(stream)
     payload = bytearray(cursor)
     HEADER.pack_into(payload, 0, MAGIC, VERSION, len(records), HEADER.size, header_size)
-    for index, (name, frame_count, left_key, right_key) in enumerate(records):
+    for index, (name, frame_count, key) in enumerate(records):
         TABLE.pack_into(payload, HEADER.size + index * TABLE.size,
                         name + b"\0" * (12 - len(name)), frame_count, FPS,
-                        offsets[left_key], len(streams[left_key]),
-                        offsets[right_key], len(streams[right_key]))
+                        offsets[key], len(streams[key]))
     for key, stream in streams.items():
         payload[offsets[key]:offsets[key] + len(stream)] = stream
     args.output.parent.mkdir(parents=True, exist_ok=True)
@@ -124,8 +117,8 @@ def main() -> None:
         args.package_output.write_bytes(package_assets(payload, srmodels))
         print(f"wrote {args.package_output} ({args.package_output.stat().st_size} bytes)")
     print(f"wrote {args.output} ({len(payload)} bytes, {len(streams)} unique streams)")
-    for emotion, frame_count, left_key, right_key in records:
-        print(emotion.decode(), frame_count, offsets[left_key], len(streams[left_key]), offsets[right_key], len(streams[right_key]))
+    for emotion, frame_count, key in records:
+        print(emotion.decode(), frame_count, offsets[key], len(streams[key]))
 
 if __name__ == "__main__":
     main()

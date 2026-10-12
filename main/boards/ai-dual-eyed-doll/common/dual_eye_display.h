@@ -16,10 +16,8 @@ struct DualEyeAnimation {
     char name[13] = {};
     uint16_t frame_count = 0;
     uint16_t fps = 0;
-    const uint8_t* left_stream = nullptr;
-    size_t left_size = 0;
-    const uint8_t* right_stream = nullptr;
-    size_t right_size = 0;
+    const uint8_t* stream = nullptr;
+    size_t stream_size = 0;
 };
 
 class DualEyeDisplay : public Display {
@@ -29,6 +27,7 @@ public:
     ~DualEyeDisplay() override;
 
     void SetEmotion(const char* emotion) override;
+    void NextAnimation();
     void SetStatus(const char* status) override;
     void SetChatMessage(const char* role, const char* content) override;
     void ShowNotification(const char* notification, int duration_ms = 3000) override;
@@ -55,8 +54,7 @@ private:
     esp_lcd_panel_handle_t left_panel_ = nullptr;
     esp_lcd_panel_handle_t right_panel_ = nullptr;
     uint16_t* frame_ = nullptr;
-    uint8_t* left_state_ = nullptr;
-    uint8_t* right_state_ = nullptr;
+    uint8_t* animation_state_ = nullptr;
     uint8_t* decode_buffer_ = nullptr;
     void* decompressor_ = nullptr;
     DualEyeAnimation animations_[8] = {};

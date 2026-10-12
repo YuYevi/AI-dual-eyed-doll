@@ -390,6 +390,7 @@ private:
         esp_lcd_panel_handle_t left_panel = nullptr;
         esp_lcd_panel_handle_t right_panel = nullptr;
         CreateEyePanel(DISPLAY_1_SPI_CS_GPIO, false, &left_io, &left_panel);
+        // Both panels share each source frame; mirror the right eye in hardware.
         CreateEyePanel(DISPLAY_2_SPI_CS_GPIO, true, &right_io, &right_panel);
         display_ = new DualEyeDisplay(left_io, left_panel, right_io, right_panel);
     }
@@ -431,7 +432,13 @@ private:
         key1_button_->OnLongPress([this]() {
             Application::GetInstance().Schedule([this]() { if (!shutting_down_) ToggleWifiConfig(); });
         });
-        key2_button_->OnClick([]() { ESP_LOGI(TAG, "KEY_2 click (reserved)"); });
+        key2_button_->OnClick([this]() {
+            Application::GetInstance().Schedule([this]() {
+                if (shutting_down_ || display_ == nullptr) return;
+                ESP_LOGI(TAG, "KEY_2 click: next animation");
+                display_->NextAnimation();
+            });
+        });
         key2_button_->OnLongPress([]() { ESP_LOGI(TAG, "KEY_2 long press (reserved)"); });
     }
 

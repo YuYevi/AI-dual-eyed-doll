@@ -15,7 +15,7 @@
 #define EYE_PIXELS (DISPLAY_WIDTH * DISPLAY_HEIGHT)
 #define EYE_BYTES (EYE_PIXELS * sizeof(uint16_t))
 #define ANIMATION_MAGIC "DEYEANIM"
-#define ANIMATION_VERSION 1
+#define ANIMATION_VERSION 2
 #define ANIMATION_MAX_COUNT 8
 #define ANIMATION_FRAME_INTERVAL_MS 40
 
@@ -33,15 +33,13 @@ struct AnimationFileEntry {
     char name[12];
     uint16_t frame_count;
     uint16_t fps;
-    uint32_t left_offset;
-    uint32_t left_size;
-    uint32_t right_offset;
-    uint32_t right_size;
+    uint32_t stream_offset;
+    uint32_t stream_size;
 };
 #pragma pack(pop)
 
 static_assert(sizeof(AnimationFileHeader) == 20, "Unexpected animation header layout");
-static_assert(sizeof(AnimationFileEntry) == 32, "Unexpected animation table layout");
+static_assert(sizeof(AnimationFileEntry) == 24, "Unexpected animation table layout");
 
 static uint32_t ReadU32(const uint8_t* data) {
     uint32_t value = 0;
@@ -72,18 +70,16 @@ DualEyeDisplay::DualEyeDisplay(esp_lcd_panel_io_handle_t left_io,
         frame_ = static_cast<uint16_t*>(
             heap_caps_malloc(EYE_BYTES, MALLOC_CAP_DMA | MALLOC_CAP_SPIRAM));
     }
-    left_state_ = static_cast<uint8_t*>(AllocateBuffer(EYE_BYTES, MALLOC_CAP_SPIRAM));
-    right_state_ = static_cast<uint8_t*>(AllocateBuffer(EYE_BYTES, MALLOC_CAP_SPIRAM));
+    animation_state_ = static_cast<uint8_t*>(AllocateBuffer(EYE_BYTES, MALLOC_CAP_SPIRAM));
     decode_buffer_ = static_cast<uint8_t*>(AllocateBuffer(EYE_BYTES, MALLOC_CAP_SPIRAM));
     decompressor_ = AllocateBuffer(sizeof(tinfl_decompressor), MALLOC_CAP_SPIRAM);
-    if (frame_ == nullptr || left_state_ == nullptr || right_state_ == nullptr ||
+    if (frame_ == nullptr || animation_state_ == nullptr ||
         decode_buffer_ == nullptr || decompressor_ == nullptr || mutex_ == nullptr ||
         flush_done_ == nullptr) {
         ESP_LOGE(TAG, "Failed to allocate animation buffers");
         return;
     }
-    memset(left_state_, 0, EYE_BYTES);
-    memset(right_state_, 0, EYE_BYTES);
+    memset(animation_state_, 0, EYE_BYTES);
 
     const esp_lcd_panel_io_callbacks_t cbs = {
         .on_color_trans_done = OnFlushDone,
@@ -93,8 +89,8 @@ DualEyeDisplay::DualEyeDisplay(esp_lcd_panel_io_handle_t left_io,
 
     // The controller's RAM is undefined at power-on. Clear both eyes even if
     // an old or missing assets partition prevents animations from loading.
-    DrawFrame(left_state_, left_panel_);
-    DrawFrame(right_state_, right_panel_);
+    DrawFrame(animation_state_, left_panel_);
+    DrawFrame(animation_state_, right_panel_);
     if (!LoadAnimations() || !SelectAnimation("calm")) {
         ESP_LOGE(TAG, "Failed to load dual-eye animations; flash the board's assets partition");
     }
@@ -124,13 +120,9 @@ DualEyeDisplay::~DualEyeDisplay() {
         heap_caps_free(decode_buffer_);
         decode_buffer_ = nullptr;
     }
-    if (right_state_ != nullptr) {
-        heap_caps_free(right_state_);
-        right_state_ = nullptr;
-    }
-    if (left_state_ != nullptr) {
-        heap_caps_free(left_state_);
-        left_state_ = nullptr;
+    if (animation_state_ != nullptr) {
+        heap_caps_free(animation_state_);
+        animation_state_ = nullptr;
     }
     if (frame_ != nullptr) {
         heap_caps_free(frame_);
@@ -229,8 +221,7 @@ bool DualEyeDisplay::LoadAnimations() {
         AnimationFileEntry entry;
         memcpy(&entry, bytes + header.table_offset + i * sizeof(entry), sizeof(entry));
         if (entry.frame_count == 0 || entry.fps == 0 ||
-            !valid_stream(entry.left_offset, entry.left_size, entry.frame_count) ||
-            !valid_stream(entry.right_offset, entry.right_size, entry.frame_count)) {
+            !valid_stream(entry.stream_offset, entry.stream_size, entry.frame_count)) {
             ESP_LOGE(TAG, "Invalid animation entry %u", static_cast<unsigned>(i));
             return false;
         }
@@ -238,10 +229,8 @@ bool DualEyeDisplay::LoadAnimations() {
         animations_[i].name[sizeof(entry.name)] = '\0';
         animations_[i].frame_count = entry.frame_count;
         animations_[i].fps = entry.fps;
-        animations_[i].left_stream = bytes + entry.left_offset;
-        animations_[i].left_size = entry.left_size;
-        animations_[i].right_stream = bytes + entry.right_offset;
-        animations_[i].right_size = entry.right_size;
+        animations_[i].stream = bytes + entry.stream_offset;
+        animations_[i].stream_size = entry.stream_size;
     }
     animation_count_ = header.count;
     return true;
@@ -253,8 +242,7 @@ bool DualEyeDisplay::SelectAnimation(const char* emotion) {
         if (strcmp(animations_[i].name, mapped) == 0) {
             animation_ = &animations_[i];
             animation_frame_ = 0;
-            memset(left_state_, 0, EYE_BYTES);
-            memset(right_state_, 0, EYE_BYTES);
+            memset(animation_state_, 0, EYE_BYTES);
             if (!RenderFrame(animation_frame_)) {
                 animation_ = nullptr;
                 return false;
@@ -349,17 +337,11 @@ bool DualEyeDisplay::RenderFrame(uint16_t frame_index) {
     if (animation_ == nullptr || frame_index >= animation_->frame_count) {
         return false;
     }
-    if (!RenderEyeFrame(animation_->left_stream, animation_->left_size, frame_index, left_state_)) {
+    if (!RenderEyeFrame(animation_->stream, animation_->stream_size, frame_index, animation_state_)) {
         return false;
     }
-    if (animation_->right_stream == animation_->left_stream &&
-        animation_->right_size == animation_->left_size) {
-        memcpy(right_state_, left_state_, EYE_BYTES);
-    } else if (!RenderEyeFrame(animation_->right_stream, animation_->right_size, frame_index,
-                               right_state_)) {
-        return false;
-    }
-    return DrawFrame(left_state_, left_panel_) && DrawFrame(right_state_, right_panel_);
+    // Both panels receive the same frame; the right panel mirrors it horizontally.
+    return DrawFrame(animation_state_, left_panel_) && DrawFrame(animation_state_, right_panel_);
 }
 
 void DualEyeDisplay::AnimationTaskEntry(void* arg) {
@@ -376,8 +358,7 @@ void DualEyeDisplay::AnimationTask() {
         if (animation_ != nullptr) {
             if (animation_frame_ >= animation_->frame_count) {
                 animation_frame_ = 0;
-                memset(left_state_, 0, EYE_BYTES);
-                memset(right_state_, 0, EYE_BYTES);
+                memset(animation_state_, 0, EYE_BYTES);
             }
             if (RenderFrame(animation_frame_)) {
                 ++animation_frame_;
@@ -433,7 +414,7 @@ const char* DualEyeDisplay::MapEmotion(const char* emotion) {
 
 void DualEyeDisplay::SetEmotion(const char* emotion) {
     DisplayLockGuard lock(this);
-    if (frame_ == nullptr || left_state_ == nullptr || right_state_ == nullptr ||
+    if (frame_ == nullptr || animation_state_ == nullptr ||
         decode_buffer_ == nullptr || decompressor_ == nullptr || flush_done_ == nullptr) {
         return;
     }
@@ -447,6 +428,25 @@ void DualEyeDisplay::SetEmotion(const char* emotion) {
         return;
     }
     SelectAnimation(mapped);
+}
+
+void DualEyeDisplay::NextAnimation() {
+    DisplayLockGuard lock(this);
+    if (frame_ == nullptr || animation_state_ == nullptr || decode_buffer_ == nullptr ||
+        decompressor_ == nullptr || flush_done_ == nullptr) {
+        return;
+    }
+    if (animation_count_ == 0 && !LoadAnimations()) {
+        return;
+    }
+    size_t next = 0;
+    for (size_t i = 0; i < animation_count_; ++i) {
+        if (animation_ == &animations_[i]) {
+            next = (i + 1) % animation_count_;
+            break;
+        }
+    }
+    SelectAnimation(animations_[next].name);
 }
 
 void DualEyeDisplay::SetStatus(const char* status) { ESP_LOGD(TAG, "SetStatus: %s", status); }

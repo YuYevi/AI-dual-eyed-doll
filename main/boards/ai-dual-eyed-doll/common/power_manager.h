@@ -7,7 +7,7 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
 
-// Board-local ADC owner: battery and USB both have 47k/47k dividers.
+// 本板的 ADC 管理对象：电池和 USB 均使用 47k/47k 分压电路。
 class PowerManager {
 public:
     PowerManager();

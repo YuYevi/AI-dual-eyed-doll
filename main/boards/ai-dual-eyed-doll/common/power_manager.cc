@@ -7,7 +7,7 @@
 
 namespace {
 constexpr char kTag[] = "DollBattery";
-// Conservative Li-ion voltage estimate; load and cell chemistry affect accuracy.
+// 根据锂离子电池电压保守估算电量；负载和电芯化学体系会影响精度。
 struct BatteryPoint { int millivolts; int percent; };
 constexpr BatteryPoint kCurve[] = {
     {3200, 0}, {3400, 5}, {3500, 10}, {3600, 20}, {3700, 40},
@@ -32,8 +32,8 @@ PowerManager::PowerManager() {
     gpio_config_t cfg = {};
     cfg.pin_bit_mask = 1ULL << FULL_STATUS_GPIO;
     cfg.mode = GPIO_MODE_INPUT;
-    // FULL is open-drain with its LED pull-up on USB_5V. Do not drive a pull-up
-    // into an unpowered charger. Its reading is ignored whenever USB is absent.
+    // FULL 为开漏输出，其 LED 上拉连接至 USB_5V。充电芯片未供电时，
+    // 不要对该引脚施加上拉。USB 未连接时忽略其读数。
     ESP_ERROR_CHECK(gpio_config(&cfg));
 
     adc_oneshot_unit_init_cfg_t unit = {};
@@ -75,7 +75,7 @@ int PowerManager::ReadMillivolts(adc_channel_t channel) {
             adc_cali_raw_to_voltage(calibration_, raw, &mv) != ESP_OK) return -1;
         total += mv;
     }
-    return (total / 16) * 2; // 47k upper / 47k lower divider.
+    return (total / 16) * 2; // 上臂 47k / 下臂 47k 分压电路。
 }
 
 bool PowerManager::GetStatus(int& level, bool& charging, bool& discharging) {
@@ -86,7 +86,7 @@ bool PowerManager::GetStatus(int& level, bool& charging, bool& discharging) {
         xSemaphoreGive(mutex_);
         return false;
     }
-    // USB hysteresis prevents unplug noise and a floating FULL from inventing charge state.
+    // USB 检测的迟滞可避免拔出时的噪声和悬空 FULL 引脚导致充电状态误判。
     usb_present_ = usb_mv >= (usb_present_ ? 3800 : 4200);
     const bool full = usb_present_ && gpio_get_level(FULL_STATUS_GPIO) == FULL_STATUS_ACTIVE_LEVEL;
     charging = usb_present_ && !full;

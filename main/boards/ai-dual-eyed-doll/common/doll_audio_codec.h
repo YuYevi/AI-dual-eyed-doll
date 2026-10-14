@@ -4,7 +4,7 @@
 #include <esp_codec_dev_defaults.h>
 #include <mutex>
 
-// V0.2: ES8311 DAC only; ES7210 MIC1/MIC2 + analog DAC reference on MIC3.
+// V0.2：ES8311 仅用作 DAC；ES7210 的 MIC1/MIC2 接麦克风，MIC3 接 DAC 模拟参考信号。
 class DollAudioCodec : public AudioCodec {
 public:
     DollAudioCodec(void* i2c_master_handle, int sample_rate,

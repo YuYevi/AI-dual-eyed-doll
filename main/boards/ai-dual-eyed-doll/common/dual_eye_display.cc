@@ -19,7 +19,7 @@
 #define ANIMATION_MAX_COUNT 8
 #define ANIMATION_FRAME_INTERVAL_MS 40
 
-// This is the on-flash table format written by scripts/pack_dual_eye_assets.py.
+// 这是 scripts/pack_dual_eye_assets.py 写入闪存的表结构格式。
 #pragma pack(push, 1)
 struct AnimationFileHeader {
     char magic[8];
@@ -94,8 +94,8 @@ DualEyeDisplay::DualEyeDisplay(esp_lcd_panel_io_handle_t left_io,
         return;
     }
 
-    // The controller's RAM is undefined at power-on. Clear both eyes even if
-    // an old or missing assets partition prevents animations from loading.
+    // 控制器 RAM 的上电内容不确定。即使资源分区过旧或缺失，
+    // 导致动画无法加载，也要清空双眼屏幕。
     if (!DrawFrame(left_state_, left_panel_) || !DrawFrame(right_state_, right_panel_)) {
         ESP_LOGE(TAG, "Failed to clear both eyes; screens stay off");
         return;
@@ -121,7 +121,7 @@ DualEyeDisplay::~DualEyeDisplay() {
         vTaskDelete(animation_task_);
         animation_task_ = nullptr;
     }
-    // Do not release the DMA buffer while a queued SPI transfer still refers to it.
+    // 只要已入队的 SPI 传输仍引用 DMA 缓冲区，就不能释放该缓冲区。
     if (flush_pending_) {
         (void)WaitFlush();
         flush_pending_ = false;
@@ -198,7 +198,7 @@ bool DualEyeDisplay::LoadAnimations() {
         return false;
     }
 
-    // Assets payloads follow a two-byte magic and are not necessarily word-aligned.
+    // 资源数据位于两个字节的魔数之后，不一定按字对齐。
     AnimationFileHeader header;
     memcpy(&header, data, sizeof(header));
     if (memcmp(header.magic, ANIMATION_MAGIC, sizeof(header.magic)) != 0 ||
@@ -327,8 +327,8 @@ bool DualEyeDisplay::DrawFrame(const uint8_t* state, esp_lcd_panel_handle_t pane
     if (state == nullptr || panel == nullptr || frame_ == nullptr) {
         return false;
     }
-    // A timed-out SPI transfer can still be using the shared DMA buffer.
-    // Its completion must be observed before replacing any of the pixels.
+    // 超时的 SPI 传输仍可能占用共享 DMA 缓冲区。
+    // 必须确认传输完成后，才能替换任何像素数据。
     if (flush_pending_) {
         if (!WaitFlush()) {
             ESP_LOGW(TAG, "Previous eye flush is still pending");
@@ -336,7 +336,7 @@ bool DualEyeDisplay::DrawFrame(const uint8_t* state, esp_lcd_panel_handle_t pane
         }
         flush_pending_ = false;
     }
-    // The animation file stores little-endian RGB565. The panel expects high byte first.
+    // 动画文件以小端序存储 RGB565；屏幕要求先发送高字节。
     for (size_t pixel = 0; pixel < EYE_PIXELS; ++pixel) {
         frame_[pixel] = static_cast<uint16_t>((state[pixel * 2] << 8) | state[pixel * 2 + 1]);
     }
@@ -393,8 +393,8 @@ void DualEyeDisplay::AnimationTask() {
             if (RenderFrame(animation_frame_)) {
                 ++animation_frame_;
             } else {
-                // The frame delta may already have been applied. Repeating it
-                // would XOR the frame back and corrupt all following frames.
+                // 帧差分可能已应用过。重复应用
+                // 会通过 XOR 将该帧还原，并破坏后续所有帧。
                 ESP_LOGE(TAG, "Stopping animation after a failed frame");
                 animation_ = nullptr;
                 current_emotion_ = nullptr;
@@ -471,7 +471,7 @@ void DualEyeDisplay::ShowNextAnimation() {
             break;
         }
     }
-    // SelectAnimation resets the XOR frame state and draws the new first frame.
+    // SelectAnimation 会重置 XOR 帧状态，并绘制新动画的首帧。
     SelectAnimation(animations_[next_index].name);
 }
 
@@ -494,7 +494,7 @@ bool DualEyeDisplay::SetScreenEnabled(bool enabled) {
     if (left_panel_ == nullptr || right_panel_ == nullptr) {
         return false;
     }
-    // Keep the animation task paused until both display-on commands succeed.
+    // 在两个屏幕的开启显示命令均成功前，保持动画任务暂停。
     screen_enabled_ = false;
     const auto left_error = esp_lcd_panel_disp_on_off(left_panel_, enabled);
     const auto right_error = esp_lcd_panel_disp_on_off(right_panel_, enabled);
@@ -507,7 +507,7 @@ bool DualEyeDisplay::SetScreenEnabled(bool enabled) {
         return false;
     }
     if (enabled) {
-        // Let the controller scan a complete valid frame before lighting it.
+        // 先让控制器扫描一帧完整有效的画面，再点亮背光。
         vTaskDelay(pdMS_TO_TICKS(ANIMATION_FRAME_INTERVAL_MS));
         screen_enabled_ = true;
         ESP_LOGI(TAG, "Both eye displays on after completed startup frames");

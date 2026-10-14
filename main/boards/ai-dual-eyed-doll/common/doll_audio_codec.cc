@@ -22,11 +22,11 @@ bool CodecOk(int result, const char* operation) {
 DollAudioCodec::DollAudioCodec(void* bus, int sample_rate,
     gpio_num_t mclk, gpio_num_t bclk, gpio_num_t ws,
     gpio_num_t dout, gpio_num_t din, gpio_num_t pa_pin) : pa_pin_(pa_pin) {
-    // The ES7210 slave setup is validated here only for the V0.2 24 kHz contract.
+    // 此处仅验证 ES7210 从机配置是否符合 V0.2 的 24 kHz 采样率约定。
     ESP_ERROR_CHECK(sample_rate == 24000 && bus != nullptr ? ESP_OK : ESP_ERR_INVALID_ARG);
     duplex_ = true;
     input_reference_ = true;
-    input_channels_ = 3; // AFE MMR: MIC1, MIC2, reference MIC3.
+    input_channels_ = 3; // AFE MMR：MIC1、MIC2，以及参考通道 MIC3。
     output_channels_ = 1;
     input_sample_rate_ = output_sample_rate_ = sample_rate;
     input_gain_ = 30.0f;
@@ -40,9 +40,9 @@ DollAudioCodec::DollAudioCodec(void* bus, int sample_rate,
     channel.auto_clear_after_cb = true;
     ESP_ERROR_CHECK(i2s_new_channel(&channel, &tx_handle_, &rx_handle_));
 
-    // One immutable physical frame: 64 BCLK, WS low/high 32 clocks each.
-    // TX is Philips stereo 16-bit data in 32-bit slots; RX is four 16-bit
-    // Philips TDM slots. Both directions therefore use exactly the same clocks.
+    // 物理帧格式固定：共 64 个 BCLK 周期，WS 低电平和高电平各占 32 个时钟周期。
+    // TX 采用 Philips 立体声格式，在 32 位时隙中传输 16 位数据；RX 采用四个 16 位的
+    // Philips TDM 时隙。因此两个方向使用完全相同的时钟。
     i2s_std_config_t tx = {};
     tx.clk_cfg = I2S_STD_CLK_DEFAULT_CONFIG(static_cast<uint32_t>(sample_rate));
     tx.clk_cfg.mclk_multiple = I2S_MCLK_MULTIPLE_256;
@@ -74,10 +74,10 @@ DollAudioCodec::DollAudioCodec(void* bus, int sample_rate,
     ESP_ERROR_CHECK(i2s_channel_enable(tx_handle_));
     ESP_ERROR_CHECK(i2s_channel_enable(rx_handle_));
 
-    // codec_dev's generic I2S data interface dynamically changes slot widths,
-    // and esp_codec_dev_open ignores its set_fmt/enable return values. Use the
-    // codec control interfaces directly and own the fixed I2S pair ourselves.
-    // Addresses below are 8-bit: the I2C adapter shifts right for IDF's 7-bit bus.
+    // codec_dev 的通用 I2S 数据接口会动态改变时隙宽度，
+    // 且 esp_codec_dev_open 会忽略其 set_fmt/enable 返回值。因此直接使用
+    // 编解码器控制接口，并自行管理这对固定配置的 I2S 通道。
+    // 以下地址为 8 位地址：I2C 适配器会右移一位，以适配 IDF 的 7 位地址总线。
     audio_codec_i2c_cfg_t ctrl = {};
     ctrl.port = 0;
     ctrl.bus_handle = bus;
@@ -91,7 +91,7 @@ DollAudioCodec::DollAudioCodec(void* bus, int sample_rate,
     dac.ctrl_if = out_ctrl_if_;
     dac.gpio_if = gpio_if_;
     dac.codec_mode = ESP_CODEC_DEV_WORK_MODE_DAC;
-    dac.pa_pin = -1; // PA is owned here; driver must never enable it prematurely.
+    dac.pa_pin = -1; // PA 由此处管理；驱动不得提前使能。
     dac.use_mclk = true;
     dac.mclk_div = 256;
     dac.hw_gain.pa_voltage = 3.3f;
@@ -123,7 +123,7 @@ void DollAudioCodec::SetPa(bool enable) {
 }
 
 bool DollAudioCodec::ApplyInputGain(float gain) {
-    // Gain masks use physical MIC numbering, NOT serial slot numbering.
+    // 增益掩码使用物理 MIC 编号，而非串行时隙编号。
     return CodecOk(in_codec_if_->set_mic_channel_gain(in_codec_if_, 0x03, gain), "MIC1/2 gain") &&
         CodecOk(in_codec_if_->set_mic_channel_gain(in_codec_if_, 0x04, 0.0f), "MIC3 reference gain");
 }
@@ -150,13 +150,13 @@ void DollAudioCodec::EnableInput(bool enable) {
     std::lock_guard<std::mutex> lock(rx_mutex_);
     if (enable == input_enabled_) return;
     if (!CodecOk(in_codec_if_->enable(in_codec_if_, enable), "ADC enable")) return;
-    // ES7210 start() restores gains, so restore the reference gain AFTER enable.
+    // ES7210 的 start() 会恢复增益，因此需在使能后重新设置参考通道增益。
     if (enable && !ApplyInputGain(input_gain_)) {
         in_codec_if_->enable(in_codec_if_, false);
         return;
     }
     if (enable) {
-        // RX DMA ran while logically disabled: discard queued stale frames.
+        // 逻辑上禁用时 RX DMA 仍在运行：丢弃队列中的过期帧。
         int16_t discard[kFrames * 4];
         for (int i = 0; i < AUDIO_CODEC_DMA_DESC_NUM + 1; ++i) {
             size_t bytes = 0;
@@ -180,7 +180,7 @@ void DollAudioCodec::EnableOutput(bool enable) {
             out_codec_if_->enable(out_codec_if_, false);
             return;
         }
-        // Replace queued playback with silence before raising the active-high PA.
+        // 在拉高高电平有效的 PA 使能信号前，将队列中的播放数据替换为静音。
         int16_t silence[kFrames * 2] = {};
         for (int i = 0; i < AUDIO_CODEC_DMA_DESC_NUM + 1; ++i) {
             size_t bytes = 0;
@@ -208,7 +208,7 @@ int DollAudioCodec::Read(int16_t* dest, int samples) {
         if (err != ESP_OK || bytes != wanted) {
             std::memset(dest, 0, samples * sizeof(int16_t));
             ESP_LOGE(TAG, "RX failed: %s, bytes=%u/%u", esp_err_to_name(err), unsigned(bytes), unsigned(wanted));
-            return 0; // Never expose an incomplete frame as valid audio.
+            return 0; // 不可将不完整的帧作为有效音频返回。
         }
         for (int i = 0; i < count; ++i) {
             dest[(frame + i) * 3] = raw[i * 4];
@@ -245,20 +245,20 @@ int DollAudioCodec::Write(const int16_t* data, int samples) {
 }
 
 DollAudioCodec::~DollAudioCodec() {
-    // Caller must stop audio tasks before destroying the codec.
+    // 调用方必须先停止音频任务，再销毁编解码器。
     std::scoped_lock lock(rx_mutex_, tx_mutex_);
     SetPa(false);
     CodecOk(out_codec_if_->enable(out_codec_if_, false), "DAC shutdown");
     CodecOk(in_codec_if_->enable(in_codec_if_, false), "ADC shutdown");
     input_enabled_ = output_enabled_ = false;
-    // codec interfaces borrow ctrl/gpio; destroy borrowers before dependencies.
+    // 编解码器接口借用 ctrl/gpio；先销毁借用方，再销毁其依赖对象。
     audio_codec_delete_codec_if(out_codec_if_);
     audio_codec_delete_codec_if(in_codec_if_);
     audio_codec_delete_ctrl_if(out_ctrl_if_);
     audio_codec_delete_ctrl_if(in_ctrl_if_);
     audio_codec_delete_gpio_if(gpio_if_);
-    // No codec_dev data interface owns these channels. Keep shared clocks until
-    // both chips are stopped, then disable RX before the clock-producing TX.
+    // 这些通道不由任何 codec_dev 数据接口管理。保持共享时钟运行，直到
+    // 两个芯片均停止，再先禁用 RX，最后禁用产生时钟的 TX。
     ESP_ERROR_CHECK(i2s_channel_disable(rx_handle_));
     ESP_ERROR_CHECK(i2s_channel_disable(tx_handle_));
     ESP_ERROR_CHECK(i2s_del_channel(rx_handle_));

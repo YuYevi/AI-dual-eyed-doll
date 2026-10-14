@@ -1,4 +1,4 @@
-#include "wifi_board.h"
+#include "dual_network_board.h"
 
 #include <driver/gpio.h>
 #include <driver/ledc.h>
@@ -17,7 +17,6 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 #include <string_view>
-#include <wifi_manager.h>
 
 #include "power_manager.h"
 #include "application.h"
@@ -32,6 +31,11 @@
 #include "esp_lcd_gc9d01.h"
 
 #define TAG "AiDualEyedDoll"
+
+// GPIO43/44 供模组使用；将应用控制台的所有输入输出切换至 USB。
+#if !defined(CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG) || !defined(CONFIG_ESP_CONSOLE_SECONDARY_NONE)
+#error "AI dual-eyed doll requires USB Serial/JTAG primary console and no secondary console; GPIO43/44 are reserved for ML307C"
+#endif
 
 static const gc9d01_lcd_init_cmd_t kGc9d01InitCommands[] = {
     {0xFE, nullptr, 0, 0},
@@ -84,11 +88,11 @@ static const gc9d01_lcd_init_cmd_t kGc9d01InitCommands[] = {
     {0xF3, (const uint8_t[]){0x47, 0xB4, 0x72, 0x34, 0x35, 0xDA}, 6, 0},
     {0x36, (const uint8_t[]){0x00}, 1, 0},
     {0x11, nullptr, 0, 200},
-    // Leave scanning disabled until both eyes contain a complete first frame.
+    // 在双眼均写入完整首帧前，保持屏幕扫描关闭。
     {0x28, nullptr, 0, 0},
 };
 
-class AiDualEyedDollBoard : public WifiBoard {
+class AiDualEyedDollBoard : public DualNetworkBoard {
 private:
     i2c_master_bus_handle_t i2c_bus_ = nullptr;
     DualEyeDisplay* display_ = nullptr;
@@ -101,14 +105,14 @@ private:
     AudioCodec* codec_ = nullptr;
 
     static void ConfigureOutput(gpio_num_t pin, int level) {
-        // Set the latch before enabling the output to avoid an active pulse.
+        // 先设置输出锁存值，再使能输出，避免产生有效电平脉冲。
         ESP_ERROR_CHECK(gpio_set_level(pin, level));
         ESP_ERROR_CHECK(gpio_set_direction(pin, GPIO_MODE_OUTPUT));
     }
 
     void InitializePowerOff() {
         gpio_deep_sleep_hold_dis();
-        // Preload OFF levels before releasing retained GPIO output levels.
+        // 在解除 GPIO 输出电平保持前，先预设关闭电平。
         for (auto pin : {POWER_EN1_GPIO, POWER_EN2_GPIO, AUDIO_PA_ENABLE_GPIO,
                          DISPLAY_BACKLIGHT_PIN, RUN_LED_GPIO}) {
             gpio_set_level(pin, pin == POWER_EN1_GPIO ? 1 : 0);
@@ -127,11 +131,11 @@ private:
         gpio_config_t key = {};
         key.pin_bit_mask = 1ULL << PWR_BUTTON_GPIO;
         key.mode = GPIO_MODE_INPUT;
-        // Q3 drives HIGH on press; external R53 supplies the released LOW level.
+        // 按下时 Q3 输出高电平；松开时由外部 R53 提供低电平。
         key.pull_up_en = GPIO_PULLUP_DISABLE;
         key.pull_down_en = GPIO_PULLDOWN_DISABLE;
         ESP_ERROR_CHECK(gpio_config(&key));
-        // Keep unpowered peripheral inputs low during startup qualification.
+        // 在确认开机条件期间，将未供电外设的输入保持为低电平。
         for (auto pin : {DISPLAY_SPI_SCLK_GPIO, DISPLAY_SPI_MOSI_GPIO, DISPLAY_SPI_DC_GPIO,
                          DISPLAY_SPI_RST_GPIO, DISPLAY_1_SPI_CS_GPIO, DISPLAY_2_SPI_CS_GPIO,
                          AUDIO_I2S_GPIO_MCLK, AUDIO_I2S_GPIO_BCLK, AUDIO_I2S_GPIO_WS,
@@ -147,7 +151,7 @@ private:
     }
 
     void ConfigureWakeAndPowerOff() {
-        // ext0 is level-triggered: qualify a stable release BEFORE arming active-level wake.
+        // ext0 为电平触发：启用有效电平唤醒前，先确认按键已稳定松开。
         int released_samples = 0;
         while (released_samples < 5) {
             released_samples = gpio_get_level(PWR_BUTTON_GPIO) != POWER_BUTTON_ACTIVE_LEVEL
@@ -157,23 +161,23 @@ private:
         ESP_ERROR_CHECK(esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_ALL));
         ESP_ERROR_CHECK(rtc_gpio_init(PWR_BUTTON_GPIO));
         ESP_ERROR_CHECK(rtc_gpio_set_direction(PWR_BUTTON_GPIO, RTC_GPIO_MODE_INPUT_ONLY));
-        // Keep both RTC pulls disabled; external R53 defines the released level.
+        // 禁用 RTC 上拉和下拉；松开时的电平由外部 R53 确定。
         ESP_ERROR_CHECK(rtc_gpio_pullup_dis(PWR_BUTTON_GPIO));
         ESP_ERROR_CHECK(rtc_gpio_pulldown_dis(PWR_BUTTON_GPIO));
         ESP_ERROR_CHECK(esp_sleep_enable_ext0_wakeup(PWR_BUTTON_GPIO, POWER_BUTTON_ACTIVE_LEVEL));
 
-        // Retain low signal levels before disabling either peripheral rail.
-        // Holds prevent background SPI/I2S activity from changing pad levels.
-        // Keep the scheduler running until IDF performs its sleep shutdown.
+        // 关闭任一外设电源前，先保持信号为低电平。
+        // 电平保持可防止后台 SPI/I2S 活动改变引脚电平。
+        // 保持调度器运行，直至 IDF 执行进入睡眠前的关闭流程。
         for (auto pin : {DISPLAY_SPI_SCLK_GPIO, DISPLAY_SPI_MOSI_GPIO, DISPLAY_SPI_DC_GPIO,
                          DISPLAY_SPI_RST_GPIO, DISPLAY_1_SPI_CS_GPIO, DISPLAY_2_SPI_CS_GPIO,
                          AUDIO_I2S_GPIO_MCLK, AUDIO_I2S_GPIO_BCLK, AUDIO_I2S_GPIO_WS,
                          AUDIO_I2S_GPIO_DOUT, AUDIO_I2S_GPIO_DIN}) {
-            gpio_reset_pin(pin); // Detach SPI/I2S peripheral output matrix.
+            gpio_reset_pin(pin); // 断开 SPI/I2S 外设的输出矩阵连接。
             gpio_set_pull_mode(pin, GPIO_FLOATING);
             gpio_set_level(pin, 0);
             gpio_set_direction(pin, GPIO_MODE_OUTPUT);
-            // Only RTC-capable pins can be retained by RTC hold (I2S pins are not).
+            // 仅支持 RTC 功能的引脚可通过 RTC 保持电平（I2S 引脚不支持）。
             if (rtc_gpio_is_valid_gpio(pin)) {
                 rtc_gpio_init(pin);
                 rtc_gpio_set_direction(pin, RTC_GPIO_MODE_OUTPUT_ONLY);
@@ -185,8 +189,8 @@ private:
                 gpio_hold_en(pin);
             }
         }
-        // Shared I2C pull-ups remain on MCU 3V3. Drive the bus low to avoid
-        // feeding the disabled codec rail through its input protection diodes.
+        // 共享 I2C 上拉仍连接至 MCU 的 3.3V 电源。将总线拉低，避免
+        // 通过输入保护二极管向已关闭的编解码器电源反向供电。
         for (auto pin : {I2C_SDA_IO, I2C_SCL_IO}) {
             rtc_gpio_init(pin);
             rtc_gpio_set_direction(pin, RTC_GPIO_MODE_OUTPUT_ONLY);
@@ -215,7 +219,7 @@ private:
 #else
         const bool ext0_wakeup = esp_sleep_get_wakeup_cause() == ESP_SLEEP_WAKEUP_EXT0;
 #endif
-        // Software reset, watchdog reset and download/reset can boot normally.
+        // 软件复位、看门狗复位以及下载/复位后均可正常启动。
         if (reset_reason != ESP_RST_POWERON && !ext0_wakeup) return true;
         ESP_LOGI(TAG, "Hold power button for %d ms to power on", POWER_BUTTON_HOLD_MS);
         const int64_t start = esp_timer_get_time();
@@ -236,8 +240,8 @@ private:
         ConfigureOutput(POWER_EN2_GPIO, 1);
         ConfigureOutput(RUN_LED_GPIO, 1);
         vTaskDelay(pdMS_TO_TICKS(50));
-        // Both controllers share SCLK/MOSI/DC. Deselect both while RESET is
-        // still held low, before either panel IO or SPI bus can send commands.
+        // 两个控制器共用 SCLK/MOSI/DC。在 RESET 仍为低电平时取消两个控制器的片选，
+        // 确保此操作早于任一屏幕 IO 或 SPI 总线发送命令。
         ConfigureOutput(DISPLAY_1_SPI_CS_GPIO, 1);
         ConfigureOutput(DISPLAY_2_SPI_CS_GPIO, 1);
         ESP_LOGI(TAG, "Screen power ready: backlight off, reset low, both CS high");
@@ -272,7 +276,7 @@ private:
             codec_->EnableOutput(false);
             codec_->EnableInput(false);
         }
-        // Allow the asynchronous backlight fade to finish, then disconnect PWM.
+        // 等待异步背光渐变完成，再断开 PWM。
         vTaskDelay(pdMS_TO_TICKS(550));
         ledc_stop(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0, DISPLAY_BACKLIGHT_OFF_LEVEL);
         ConfigureOutput(AUDIO_PA_ENABLE_GPIO, 0);
@@ -280,16 +284,18 @@ private:
     }
 
     void ToggleWifiConfig() {
-        if (IsInWifiConfigMode()) {
-            ESP_LOGI(TAG, "KEY_1 long press: exit WiFi config");
-            WifiManager::GetInstance().StopConfigAp();
-            in_config_mode_ = false;
-            Application::GetInstance().DismissAlert();
-            TryWifiConnect();
+        if (GetNetworkType() != NetworkType::WIFI) {
+            ESP_LOGI(TAG, "KEY_1 long press: WiFi provisioning unavailable in 4G mode");
+            return;
+        }
+        auto& wifi_board = static_cast<WifiBoard&>(GetCurrentBoard());
+        if (wifi_board.IsInWifiConfigMode()) {
+            ESP_LOGI(TAG, "KEY_1 long press: exit WiFi config and reboot");
+            Application::GetInstance().Reboot();
             return;
         }
         ESP_LOGI(TAG, "KEY_1 long press: enter WiFi config");
-        EnterWifiConfigMode();
+        wifi_board.EnterWifiConfigMode();
     }
 
     static void PlayTouchReaction(const char* emotion, const std::string_view& sound) {
@@ -328,7 +334,7 @@ private:
         cfg.scl_speed_hz = 100000;
         i2c_master_dev_handle_t device = nullptr;
         ESP_ERROR_CHECK(i2c_master_bus_add_device(i2c_bus_, &cfg, &device));
-        const uint8_t inputs[] = {0x03, 0xFF}; // Configuration: all eight pins input.
+        const uint8_t inputs[] = {0x03, 0xFF}; // 配置：全部八个引脚均设为输入。
         const auto result = i2c_master_transmit(device, inputs, sizeof(inputs), 100);
         ESP_ERROR_CHECK(i2c_master_bus_rm_device(device));
         ESP_ERROR_CHECK(result);
@@ -347,7 +353,7 @@ private:
     }
 
     void ResetEyes() {
-        // One shared hardware reset. Never release RESET before both CS are high.
+        // 共用一次硬件复位。在两个 CS 均为高电平前，不可释放 RESET。
         ConfigureOutput(DISPLAY_SPI_RST_GPIO, 0);
         vTaskDelay(pdMS_TO_TICKS(50));
         ESP_ERROR_CHECK(gpio_set_level(DISPLAY_SPI_RST_GPIO, 1));
@@ -377,8 +383,8 @@ private:
         panel_config.bits_per_pixel = 16;
         panel_config.vendor_config = &vendor_config;
         ESP_ERROR_CHECK(esp_lcd_new_panel_gc9d01(*io_out, &panel_config, panel_out));
-        // ResetEyes already reset both controllers together. The driver must
-        // not reset the shared line, nor issue a second software reset here.
+        // ResetEyes 已同时复位两个控制器。驱动在此处
+        // 不得再次操作共用复位线，也不得再次发送软件复位命令。
         ESP_ERROR_CHECK(esp_lcd_panel_disp_on_off(*panel_out, false));
         ESP_ERROR_CHECK(esp_lcd_panel_init(*panel_out));
         ESP_ERROR_CHECK(esp_lcd_panel_invert_color(*panel_out, DISPLAY_INVERT_COLOR));
@@ -404,11 +410,11 @@ private:
         key1_button_ = std::make_unique<Button>(KEY_1_GPIO, false, 2000);
         key2_button_ = std::make_unique<Button>(KEY_2_GPIO, false, 2000);
         pwr_button_ = std::make_unique<Button>(PWR_BUTTON_GPIO, POWER_BUTTON_ACTIVE_LEVEL == 1, POWER_BUTTON_HOLD_MS);
-        // Button enables an internal pull by default; this board uses external R53.
+        // Button 默认启用内部上下拉；本板使用外部 R53。
         ESP_ERROR_CHECK(gpio_set_pull_mode(PWR_BUTTON_GPIO, GPIO_FLOATING));
         touch1_button_ = std::make_unique<Button>(TOUCH_1_GPIO, TOUCH_ACTIVE_HIGH);
         touch2_button_ = std::make_unique<Button>(TOUCH_2_GPIO, TOUCH_ACTIVE_HIGH);
-        // Assembled TOG is grounded: releases must not produce a second reaction.
+        // 实装 TOG 接地：松开时不得再次触发响应。
         touch1_button_->OnPressDown([this]() {
             if (!shutting_down_) PlayTouchReaction("happy", BoardSounds::OGG_SHORT_LAUGH);
         });
@@ -425,7 +431,7 @@ private:
             });
         });
         pwr_button_->OnLongPress([this]() {
-            // Ignore the initial startup hold until a release and a fresh press.
+            // 忽略开机时的首次持续按压，直到松开并重新按下。
             if (!power_press_accepted_ || shutting_down_.exchange(true)) return;
             Application::GetInstance().Schedule([this]() { Shutdown(); });
         });
@@ -445,13 +451,18 @@ private:
                 display_->ShowNextAnimation();
             });
         });
-        key2_button_->OnLongPress([]() { ESP_LOGI(TAG, "KEY_2 long press (reserved)"); });
+        key2_button_->OnLongPress([this]() {
+            if (shutting_down_) return;
+            Application::GetInstance().Schedule([this]() {
+                if (!shutting_down_) SwitchNetworkType();
+            });
+        });
     }
 
     void InitializeBattery() { battery_monitor_ = new PowerManager(); }
 
 public:
-    AiDualEyedDollBoard() {
+    AiDualEyedDollBoard() : DualNetworkBoard(ML307_TX_PIN, ML307_RX_PIN, ML307_DTR_PIN) {
         InitializePowerOff();
         if (!QualifyPowerOn()) ConfigureWakeAndPowerOff();
         EnablePeripheralPower();

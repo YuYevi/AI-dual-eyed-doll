@@ -11,7 +11,11 @@
                 "CONFIG_FLASH_CUSTOM_ASSETS=y",
                 "CONFIG_CUSTOM_ASSETS_FILE=\"boards/ai-dual-eyed-doll/assets/dual_eye_assets.pack\"",
                 "CONFIG_USE_DEVICE_AEC=y",
-                "CONFIG_ESP_MAIN_TASK_STACK_SIZE=16384"
+                "CONFIG_ESP_MAIN_TASK_STACK_SIZE=16384",
+                "CONFIG_ESP_CONSOLE_UART_DEFAULT=n",
+                "CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y",
+                "CONFIG_ESP_CONSOLE_SECONDARY_USB_SERIAL_JTAG=n",
+                "CONFIG_ESP_CONSOLE_SECONDARY_NONE=y"
             ]
         }
     ]

@@ -45,7 +45,7 @@ MqttProtocol::~MqttProtocol() {
         esp_timer_delete(reconnect_timer_);
     }
 
-    std::unique_ptr<Udp> udp;
+    std::shared_ptr<Udp> udp;
     {
         std::lock_guard<std::mutex> lock(channel_mutex_);
         udp = std::move(udp_);
@@ -178,41 +178,47 @@ bool MqttProtocol::SendText(const std::string& text) {
 }
 
 bool MqttProtocol::SendAudio(std::unique_ptr<AudioStreamPacket> packet) {
-    std::lock_guard<std::mutex> lock(channel_mutex_);
-    if (udp_ == nullptr) {
-        return false;
-    }
-
-    constexpr size_t kAudioHeaderSize = 16;
-    if (aes_nonce_.size() != kAudioHeaderSize || packet->payload.size() > UINT16_MAX) {
-        ESP_LOGE(TAG, "Invalid AES nonce or audio payload length: %zu", packet->payload.size());
-        return false;
-    }
-
-    std::string nonce(aes_nonce_);
-    const uint16_t payload_len = htons(static_cast<uint16_t>(packet->payload.size()));
-    const uint32_t timestamp = htonl(packet->timestamp);
-    const uint32_t sequence = htonl(++local_sequence_);
-    memcpy(nonce.data() + 2, &payload_len, sizeof(payload_len));
-    memcpy(nonce.data() + 8, &timestamp, sizeof(timestamp));
-    memcpy(nonce.data() + 12, &sequence, sizeof(sequence));
-
+    std::shared_ptr<Udp> udp;
     std::string encrypted;
-    encrypted.resize(aes_nonce_.size() + packet->payload.size());
-    memcpy(encrypted.data(), nonce.data(), nonce.size());
+    {
+        std::lock_guard<std::mutex> lock(channel_mutex_);
+        if (udp_ == nullptr) {
+            return false;
+        }
 
-    if (!CryptAesCtr(reinterpret_cast<const uint8_t*>(packet->payload.data()),
-                     packet->payload.size(), reinterpret_cast<const uint8_t*>(nonce.data()),
-                     reinterpret_cast<uint8_t*>(&encrypted[nonce.size()]))) {
-        ESP_LOGE(TAG, "Failed to encrypt audio data");
-        return false;
+        constexpr size_t kAudioHeaderSize = 16;
+        if (aes_nonce_.size() != kAudioHeaderSize || packet->payload.size() > UINT16_MAX) {
+            ESP_LOGE(TAG, "Invalid AES nonce or audio payload length: %zu", packet->payload.size());
+            return false;
+        }
+
+        std::string nonce(aes_nonce_);
+        const uint16_t payload_len = htons(static_cast<uint16_t>(packet->payload.size()));
+        const uint32_t timestamp = htonl(packet->timestamp);
+        const uint32_t sequence = htonl(++local_sequence_);
+        memcpy(nonce.data() + 2, &payload_len, sizeof(payload_len));
+        memcpy(nonce.data() + 8, &timestamp, sizeof(timestamp));
+        memcpy(nonce.data() + 12, &sequence, sizeof(sequence));
+
+        encrypted.resize(aes_nonce_.size() + packet->payload.size());
+        memcpy(encrypted.data(), nonce.data(), nonce.size());
+
+        if (!CryptAesCtr(reinterpret_cast<const uint8_t*>(packet->payload.data()),
+                         packet->payload.size(), reinterpret_cast<const uint8_t*>(nonce.data()),
+                         reinterpret_cast<uint8_t*>(&encrypted[nonce.size()]))) {
+            ESP_LOGE(TAG, "Failed to encrypt audio data");
+            return false;
+        }
+        udp = udp_;
     }
 
-    return udp_->Send(encrypted) > 0;
+    // 发送等待串口任务确认；先解锁，让同一任务的下行音频回调也能访问通道。
+    // 快照保证并发关闭通道时，UDP 对象仍存活到本次发送结束。
+    return udp->Send(encrypted) > 0;
 }
 
 void MqttProtocol::CloseAudioChannel(bool send_goodbye) {
-    std::unique_ptr<Udp> udp;
+    std::shared_ptr<Udp> udp;
     {
         std::lock_guard<std::mutex> lock(channel_mutex_);
         udp = std::move(udp_);
@@ -237,6 +243,14 @@ void MqttProtocol::CloseAudioChannel(bool send_goodbye) {
 }
 
 bool MqttProtocol::OpenAudioChannel() {
+    std::shared_ptr<Udp> previous_udp;
+    {
+        std::lock_guard<std::mutex> lock(channel_mutex_);
+        previous_udp = std::move(udp_);
+    }
+    // 相同 UDP ID 重开前先在锁外关闭旧实例，避免析构时关闭新通道或阻塞收发回调。
+    previous_udp.reset();
+
     if (mqtt_ == nullptr || !mqtt_->IsConnected()) {
         ESP_LOGI(TAG, "MQTT is not connected, try to connect now");
         if (!StartMqttClient(true)) {

@@ -29,11 +29,11 @@
 
 音频实现参考[上游 SZPI 板](https://github.com/78/xiaozhi-esp32/blob/main/main/boards/lckfb/szpi-esp32s3/lichuang_dev_board.cc)，复用官方 `BoxAudioCodec`、ES7210、ES8311 和 `esp_codec_dev`。本板在板级适配功放 GPIO16，并配置为双麦 MMR：MIC1、MIC2 为人声，MIC3 为扬声器回声参考；采样率为 24 kHz，AI 输入重采样为 16 kHz，启用双麦语音增强和设备端 AEC。
 
-ES7210 的 TDM 顺序为 MIC1、MIC3、MIC2、MIC4。驱动选择掩码 `0x7`，再将数据重排为 MIC1、MIC2、MIC3 参考，供录放和 AI 使用。录放测试混合两只人声麦克风，不混入回声参考。
+ES7210 的 TDM 顺序为 MIC1、MIC3、MIC2、MIC4。驱动选择掩码 `0x7`，再将数据重排为 MIC1、MIC2、MIC3 参考。AI 使用 `AFE_TYPE_SR`、`AEC_MODE_SR_HIGH_PERF` 和 SE 处理双麦；VC 模式只支持单麦，不能用于本板双麦阵列。公共录放测试当前仅回放 MIC1，不能据此验证 MIC2 是否参与 AI 处理。
 
 本板的 GPIO40（I²S DIN）必须保持纯输入、无上下拉；板级已在上电、外设初始化和关机流程中处理。原自定义 `DollAudioCodec` 已移除，公共驱动的默认参数仍兼容其他单麦板型。
 
-双麦固件已通过编译并烧录校验。用户已确认 MIC1、MIC2 分别讲话均可回放，关机重启后再次测试也正常。AI 对话和 AEC 效果尚未单独验收。
+用户已确认本地录放及关机重启后录放正常。AI 双麦初始化应检查串口 `2MIC`、`2 microphone` 和 SE 流程，AI 对话及 AEC 效果仍需实机验收。
 
 固件操作映射：
 
@@ -51,6 +51,8 @@ ES7210 的 TDM 顺序为 MIC1、MIC3、MIC2、MIC4。驱动选择掩码 `0x7`，
 - GPIO43/44 不再用于应用 UART0 控制台。构建配置将主控制台改为 USB Serial/JTAG，关闭第二控制台；使用 ESP32-S3 原生 USB 接口查看日志。板级编译检查会拒绝不符合该控制台配置的构建，避免控制台占用模组引脚。
 
 官方上游实现参考：[双网络切换与持久化（dual_network_board.cc）](https://github.com/78/xiaozhi-esp32/blob/main/main/boards/common/dual_network_board.cc)、[ML307 模组初始化与通信（ml307_board.cc）](https://github.com/78/xiaozhi-esp32/blob/main/main/boards/common/ml307_board.cc)。
+
+MQTT 音频必须在释放通道锁后发送。ML307 的 AT 确认与下行音频共用串口解析任务，持锁等待发送确认会阻塞下行回调，直到发送超时。发送期间通过共享所有权保持 UDP 对象有效，避免并发关闭时提前销毁；无需调整驱动发送超时或修改 ESP-IDF 组件。
 
 ## 构建与分区
 

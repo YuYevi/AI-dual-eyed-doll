@@ -27,7 +27,13 @@
 
 ## 音频与按键
 
-音频输入配置为三通道、24 kHz，启用设备端 AEC；MMR Codec 新增设备 AEC 24 kHz 支持。运行时会将输入重采样为 16 kHz 后交给语音处理。
+音频实现参考[上游 SZPI 板](https://github.com/78/xiaozhi-esp32/blob/main/main/boards/lckfb/szpi-esp32s3/lichuang_dev_board.cc)，复用官方 `BoxAudioCodec`、ES7210、ES8311 和 `esp_codec_dev`。本板在板级适配功放 GPIO16，并配置为双麦 MMR：MIC1、MIC2 为人声，MIC3 为扬声器回声参考；采样率为 24 kHz，AI 输入重采样为 16 kHz，启用双麦语音增强和设备端 AEC。
+
+ES7210 的 TDM 顺序为 MIC1、MIC3、MIC2、MIC4。驱动选择掩码 `0x7`，再将数据重排为 MIC1、MIC2、MIC3 参考，供录放和 AI 使用。录放测试混合两只人声麦克风，不混入回声参考。
+
+本板的 GPIO40（I²S DIN）必须保持纯输入、无上下拉；板级已在上电、外设初始化和关机流程中处理。原自定义 `DollAudioCodec` 已移除，公共驱动的默认参数仍兼容其他单麦板型。
+
+双麦固件已通过编译并烧录校验。用户已确认 MIC1、MIC2 分别讲话均可回放，关机重启后再次测试也正常。AI 对话和 AEC 效果尚未单独验收。
 
 固件操作映射：
 

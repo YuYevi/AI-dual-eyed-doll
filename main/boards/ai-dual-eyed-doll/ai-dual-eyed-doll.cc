@@ -24,7 +24,7 @@
 #include "board.h"
 #include "board_sounds.h"
 #include "button.h"
-#include "doll_audio_codec.h"
+#include "codecs/box_audio_codec.h"
 
 #include "config.h"
 #include "dual_eye_display.h"
@@ -36,6 +36,25 @@
 #if !defined(CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG) || !defined(CONFIG_ESP_CONSOLE_SECONDARY_NONE)
 #error "AI dual-eyed doll requires USB Serial/JTAG primary console and no secondary console; GPIO43/44 are reserved for ML307C"
 #endif
+
+// 复用上游 SZPI 的驱动结构，扩展为两路人声和一路回声参考。
+class CustomAudioCodec : public BoxAudioCodec {
+public:
+    explicit CustomAudioCodec(i2c_master_bus_handle_t i2c_bus)
+        : BoxAudioCodec(i2c_bus, AUDIO_INPUT_SAMPLE_RATE, AUDIO_OUTPUT_SAMPLE_RATE,
+                        AUDIO_I2S_GPIO_MCLK, AUDIO_I2S_GPIO_BCLK, AUDIO_I2S_GPIO_WS,
+                        AUDIO_I2S_GPIO_DOUT, AUDIO_I2S_GPIO_DIN, GPIO_NUM_NC,
+                        AUDIO_CODEC_ES8311_ADDR, AUDIO_CODEC_ES7210_ADDR, AUDIO_INPUT_REFERENCE,
+                        28.0f,  // 物理 MIC1 和 MIC2 的增益
+                        2,      // 物理 MIC3 作为播放回声参考输入
+                        0.0f,
+                        2) {}   // 两只实体麦克风，另加一路回声参考
+
+    void EnableOutput(bool enable) override {
+        BoxAudioCodec::EnableOutput(enable);
+        ESP_ERROR_CHECK(gpio_set_level(AUDIO_PA_ENABLE_GPIO, enable ? 1 : 0));
+    }
+};
 
 static const gc9d01_lcd_init_cmd_t kGc9d01InitCommands[] = {
     {0xFE, nullptr, 0, 0},
@@ -110,8 +129,17 @@ private:
         ESP_ERROR_CHECK(gpio_set_direction(pin, GPIO_MODE_OUTPUT));
     }
 
+    static void ConfigureAudioInput() {
+        // DIN 由 ES7210 驱动。gpio_reset_pin() 会开启上拉，而设置输入方向
+        // 和 I2S 初始化都不会清除它；必须同时撤销输出及内部上下拉。
+        ESP_ERROR_CHECK(gpio_hold_dis(AUDIO_I2S_GPIO_DIN));
+        ESP_ERROR_CHECK(gpio_set_direction(AUDIO_I2S_GPIO_DIN, GPIO_MODE_INPUT));
+        ESP_ERROR_CHECK(gpio_set_pull_mode(AUDIO_I2S_GPIO_DIN, GPIO_FLOATING));
+    }
+
     void InitializePowerOff() {
         gpio_deep_sleep_hold_dis();
+        ConfigureAudioInput();
         // 在解除 GPIO 输出电平保持前，先预设关闭电平。
         for (auto pin : {POWER_EN1_GPIO, POWER_EN2_GPIO, AUDIO_PA_ENABLE_GPIO,
                          DISPLAY_BACKLIGHT_PIN, RUN_LED_GPIO}) {
@@ -139,7 +167,7 @@ private:
         for (auto pin : {DISPLAY_SPI_SCLK_GPIO, DISPLAY_SPI_MOSI_GPIO, DISPLAY_SPI_DC_GPIO,
                          DISPLAY_SPI_RST_GPIO, DISPLAY_1_SPI_CS_GPIO, DISPLAY_2_SPI_CS_GPIO,
                          AUDIO_I2S_GPIO_MCLK, AUDIO_I2S_GPIO_BCLK, AUDIO_I2S_GPIO_WS,
-                         AUDIO_I2S_GPIO_DOUT, AUDIO_I2S_GPIO_DIN, I2C_SDA_IO, I2C_SCL_IO}) {
+                         AUDIO_I2S_GPIO_DOUT, I2C_SDA_IO, I2C_SCL_IO}) {
             gpio_hold_dis(pin);
             if (rtc_gpio_is_valid_gpio(pin)) {
                 rtc_gpio_hold_dis(pin);
@@ -166,13 +194,15 @@ private:
         ESP_ERROR_CHECK(rtc_gpio_pulldown_dis(PWR_BUTTON_GPIO));
         ESP_ERROR_CHECK(esp_sleep_enable_ext0_wakeup(PWR_BUTTON_GPIO, POWER_BUTTON_ACTIVE_LEVEL));
 
-        // 关闭任一外设电源前，先保持信号为低电平。
+        // DIN 在关机和下次唤醒期间也保持无上下拉的输入，不能加入输出保护列表。
+        ConfigureAudioInput();
+        // 关闭任一外设电源前，先将 MCU 驱动的信号保持为低电平。
         // 电平保持可防止后台 SPI/I2S 活动改变引脚电平。
         // 保持调度器运行，直至 IDF 执行进入睡眠前的关闭流程。
         for (auto pin : {DISPLAY_SPI_SCLK_GPIO, DISPLAY_SPI_MOSI_GPIO, DISPLAY_SPI_DC_GPIO,
                          DISPLAY_SPI_RST_GPIO, DISPLAY_1_SPI_CS_GPIO, DISPLAY_2_SPI_CS_GPIO,
                          AUDIO_I2S_GPIO_MCLK, AUDIO_I2S_GPIO_BCLK, AUDIO_I2S_GPIO_WS,
-                         AUDIO_I2S_GPIO_DOUT, AUDIO_I2S_GPIO_DIN}) {
+                         AUDIO_I2S_GPIO_DOUT}) {
             gpio_reset_pin(pin); // 断开 SPI/I2S 外设的输出矩阵连接。
             gpio_set_pull_mode(pin, GPIO_FLOATING);
             gpio_set_level(pin, 0);
@@ -236,6 +266,7 @@ private:
     }
 
     void EnablePeripheralPower() {
+        ConfigureAudioInput();
         ConfigureOutput(POWER_EN1_GPIO, 0);
         ConfigureOutput(POWER_EN2_GPIO, 1);
         ConfigureOutput(RUN_LED_GPIO, 1);
@@ -307,7 +338,7 @@ private:
 
     void InitializeI2c() {
         i2c_master_bus_config_t i2c_bus_cfg = {
-            .i2c_port = I2C_NUM_0,
+            .i2c_port = AUDIO_CODEC_I2C_PORT,
             .sda_io_num = I2C_SDA_IO,
             .scl_io_num = I2C_SCL_IO,
             .clk_source = I2C_CLK_SRC_DEFAULT,
@@ -476,7 +507,7 @@ public:
     }
 
     virtual AudioCodec* GetAudioCodec() override {
-        static DollAudioCodec audio_codec(i2c_bus_, AUDIO_INPUT_SAMPLE_RATE, AUDIO_I2S_GPIO_MCLK, AUDIO_I2S_GPIO_BCLK, AUDIO_I2S_GPIO_WS, AUDIO_I2S_GPIO_DOUT, AUDIO_I2S_GPIO_DIN, AUDIO_PA_ENABLE_GPIO);
+        static CustomAudioCodec audio_codec(i2c_bus_);
         codec_ = &audio_codec;
         return codec_;
     }

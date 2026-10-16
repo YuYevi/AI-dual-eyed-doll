@@ -114,8 +114,9 @@ bool AfeAudioEngine::Initialize(AudioCodec* codec, int frame_duration_ms, srmode
     }
 
     int ref_num = codec_->input_reference() ? 1 : 0;
+    const int microphone_count = codec_->input_channels() - ref_num;
     std::string input_format;
-    for (int i = 0; i < codec_->input_channels() - ref_num; ++i) {
+    for (int i = 0; i < microphone_count; ++i) {
         input_format.push_back('M');
     }
     for (int i = 0; i < ref_num; ++i) {
@@ -135,6 +136,8 @@ bool AfeAudioEngine::Initialize(AudioCodec* codec, int frame_duration_ms, srmode
     afe_config->aec_init = codec_->input_reference();
     afe_config->aec_mode = AEC_MODE_VOIP_HIGH_PERF;
     afe_config->aec_nlp_level = AEC_NLP_LEVEL_VERYAGGR;
+    // 未启用阵列处理时，AFE 只会使用第一路麦克风。
+    afe_config->se_init = microphone_count > 1;
     afe_config->ns_init = false;
     afe_config->vad_init = kUseAfeForVoiceProcessing;
     afe_config->vad_mode = VAD_MODE_0;
@@ -186,8 +189,9 @@ bool AfeAudioEngine::Initialize(AudioCodec* codec, int frame_duration_ms, srmode
     const char* detector = wake_detector_ == WakeDetector::kWakeNet
         ? "WakeNet"
         : (wake_detector_ == WakeDetector::kMultiNet ? "MultiNet" : "none");
-    ESP_LOGI(TAG, "Initialized FD AFE, detector: %s, NS: off, feed: %d, fetch: %d",
-        detector, afe_iface_->get_feed_chunksize(afe_data_), afe_iface_->get_fetch_chunksize(afe_data_));
+    ESP_LOGI(TAG, "Initialized FD AFE, input: %s, SE: %s, detector: %s, NS: off, feed: %d, fetch: %d",
+        input_format.c_str(), microphone_count > 1 ? "on" : "off", detector,
+        afe_iface_->get_feed_chunksize(afe_data_), afe_iface_->get_fetch_chunksize(afe_data_));
     return true;
 }
 
@@ -456,8 +460,13 @@ void AfeAudioEngine::OutputRawAudio(const std::vector<int16_t>& data) {
     if (channels <= 1) {
         output_buffer_.insert(output_buffer_.end(), data.begin(), data.end());
     } else {
-        for (size_t i = 0; i < data.size(); i += channels) {
-            output_buffer_.push_back(data[i]);
+        const size_t microphones = channels - (codec_->input_reference() ? 1 : 0);
+        for (size_t i = 0; i + channels <= data.size(); i += channels) {
+            int32_t sum = 0;
+            for (size_t mic = 0; mic < microphones; ++mic) {
+                sum += data[i + mic];
+            }
+            output_buffer_.push_back(static_cast<int16_t>(sum / static_cast<int32_t>(microphones)));
         }
     }
     while (output_buffer_.size() >= static_cast<size_t>(frame_samples_)) {

@@ -3,6 +3,7 @@
 #include <esp_log.h>
 #include <driver/i2c_master.h>
 #include <driver/i2s_tdm.h>
+#include <utility>
 
 #define TAG "BoxAudioCodec"
 
@@ -10,10 +11,12 @@ BoxAudioCodec::BoxAudioCodec(void* i2c_master_handle, int input_sample_rate, int
                              gpio_num_t mclk, gpio_num_t bclk, gpio_num_t ws, gpio_num_t dout,
                              gpio_num_t din, gpio_num_t pa_pin, uint8_t es8311_addr,
                              uint8_t es7210_addr, bool input_reference, float input_gain,
-                             int reference_gain_channel, float reference_gain) {
+                             int reference_gain_channel, float reference_gain, int microphone_count) {
+    assert(microphone_count == 1 || microphone_count == 2);
+    microphone_count_ = microphone_count;
     duplex_ = true;                              // 是否双工
     input_reference_ = input_reference;          // 是否使用参考输入，实现回声消除
-    input_channels_ = input_reference_ ? 2 : 1;  // 输入通道数
+    input_channels_ = microphone_count_ + (input_reference_ ? 1 : 0);
     input_sample_rate_ = input_sample_rate;
     output_sample_rate_ = output_sample_rate;
     input_gain_ = input_gain;
@@ -206,9 +209,18 @@ void BoxAudioCodec::EnableInput(bool enable) {
         if (input_reference_) {
             fs.channel_mask |= ESP_CODEC_DEV_MAKE_CHANNEL_MASK(1);
         }
+        if (microphone_count_ == 2) {
+            // 物理 MIC2 位于 TDM 时隙 2；时隙 1 携带 MIC3 回声参考。
+            fs.channel_mask |= ESP_CODEC_DEV_MAKE_CHANNEL_MASK(2);
+        }
         ESP_ERROR_CHECK(esp_codec_dev_open(input_dev_, &fs));
+        uint16_t microphone_mask = ESP_CODEC_DEV_MAKE_CHANNEL_MASK(0);
+        if (microphone_count_ == 2) {
+            // 增益掩码对应物理 MIC 输入，不对应 TDM 时隙。
+            microphone_mask |= ESP_CODEC_DEV_MAKE_CHANNEL_MASK(1);
+        }
         ESP_ERROR_CHECK(esp_codec_dev_set_in_channel_gain(
-            input_dev_, ESP_CODEC_DEV_MAKE_CHANNEL_MASK(0), input_gain_));
+            input_dev_, microphone_mask, input_gain_));
         if (input_reference_ && reference_gain_channel_ >= 0) {
             // ES7210 gain masks use physical MIC numbering, which differs
             // from the TDM slot order (MIC1, MIC3, MIC2, MIC4).
@@ -216,6 +228,8 @@ void BoxAudioCodec::EnableInput(bool enable) {
                 input_dev_, ESP_CODEC_DEV_MAKE_CHANNEL_MASK(reference_gain_channel_),
                 reference_gain_));
         }
+        ESP_LOGI(TAG, "Input: %d microphones, reference: %s, TDM mask: 0x%x",
+                 microphone_count_, input_reference_ ? "on" : "off", fs.channel_mask);
     } else {
         ESP_ERROR_CHECK(esp_codec_dev_close(input_dev_));
     }
@@ -245,8 +259,19 @@ void BoxAudioCodec::EnableOutput(bool enable) {
 }
 
 int BoxAudioCodec::Read(int16_t* dest, int samples) {
-    if (input_enabled_) {
-        ESP_ERROR_CHECK_WITHOUT_ABORT(esp_codec_dev_read(input_dev_, (void*)dest, samples * sizeof(int16_t)));
+    if (!input_enabled_) {
+        return 0;
+    }
+    auto ret = esp_codec_dev_read(input_dev_, (void*)dest, samples * sizeof(int16_t));
+    ESP_ERROR_CHECK_WITHOUT_ABORT(ret);
+    if (ret != ESP_OK) {
+        return 0;
+    }
+    if (microphone_count_ == 2 && input_reference_) {
+        // DMA 将选中时隙排列为 MIC1、MIC3、MIC2；AFE 需要 M、M、R 顺序。
+        for (int i = 0; i + 2 < samples; i += 3) {
+            std::swap(dest[i + 1], dest[i + 2]);
+        }
     }
     return samples;
 }

@@ -22,6 +22,7 @@ private:
     std::mutex data_if_mutex_;
     int reference_gain_channel_ = -1;
     float reference_gain_ = 0.0f;
+    int microphone_count_ = 1;
 
     void CreateDuplexChannels(gpio_num_t mclk, gpio_num_t bclk, gpio_num_t ws, gpio_num_t dout,
                               gpio_num_t din);
@@ -34,7 +35,7 @@ public:
                   gpio_num_t mclk, gpio_num_t bclk, gpio_num_t ws, gpio_num_t dout, gpio_num_t din,
                   gpio_num_t pa_pin, uint8_t es8311_addr, uint8_t es7210_addr, bool input_reference,
                   float input_gain = 30.0f, int reference_gain_channel = -1,
-                  float reference_gain = 0.0f);
+                  float reference_gain = 0.0f, int microphone_count = 1);
     virtual ~BoxAudioCodec();
 
     virtual void SetOutputVolume(int volume) override;

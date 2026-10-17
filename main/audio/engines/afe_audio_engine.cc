@@ -127,16 +127,16 @@ bool AfeAudioEngine::Initialize(AudioCodec* codec, int frame_duration_ms, srmode
         ? nullptr
         : esp_srmodel_filter(models_, ESP_VADN_PREFIX, nullptr);
     afe_config_t* afe_config = afe_config_init(
-        input_format.c_str(), models_, AFE_TYPE_VC, AFE_MODE_HIGH_PERF);
+        input_format.c_str(), models_, AFE_TYPE_SR, AFE_MODE_HIGH_PERF);
     if (afe_config == nullptr) {
         ESP_LOGE(TAG, "Failed to create AFE configuration");
         return false;
     }
 
     afe_config->aec_init = codec_->input_reference();
-    afe_config->aec_mode = AEC_MODE_VOIP_HIGH_PERF;
+    afe_config->aec_mode = AEC_MODE_SR_HIGH_PERF;
     afe_config->aec_nlp_level = AEC_NLP_LEVEL_VERYAGGR;
-    // 未启用阵列处理时，AFE 只会使用第一路麦克风。
+    // VC 模式只支持单麦；SR 模式配合阵列处理才能同时使用两路麦克风。
     afe_config->se_init = microphone_count > 1;
     afe_config->ns_init = false;
     afe_config->vad_init = kUseAfeForVoiceProcessing;
@@ -159,7 +159,7 @@ bool AfeAudioEngine::Initialize(AudioCodec* codec, int frame_duration_ms, srmode
     afe_config_free(afe_config);
 
     if (afe_iface_ == nullptr || afe_data_ == nullptr) {
-        ESP_LOGE(TAG, "Failed to create FD AFE instance");
+        ESP_LOGE(TAG, "Failed to create SR AFE instance");
         afe_iface_ = nullptr;
         afe_data_ = nullptr;
         return false;
@@ -189,7 +189,7 @@ bool AfeAudioEngine::Initialize(AudioCodec* codec, int frame_duration_ms, srmode
     const char* detector = wake_detector_ == WakeDetector::kWakeNet
         ? "WakeNet"
         : (wake_detector_ == WakeDetector::kMultiNet ? "MultiNet" : "none");
-    ESP_LOGI(TAG, "Initialized FD AFE, input: %s, SE: %s, detector: %s, NS: off, feed: %d, fetch: %d",
+    ESP_LOGI(TAG, "Initialized SR AFE, input: %s, SE: %s, detector: %s, NS: off, feed: %d, fetch: %d",
         input_format.c_str(), microphone_count > 1 ? "on" : "off", detector,
         afe_iface_->get_feed_chunksize(afe_data_), afe_iface_->get_fetch_chunksize(afe_data_));
     return true;

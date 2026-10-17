@@ -37,7 +37,7 @@
 #error "AI dual-eyed doll requires USB Serial/JTAG primary console and no secondary console; GPIO43/44 are reserved for ML307C"
 #endif
 
-// 复用上游 SZPI 的驱动结构，扩展为两路人声和一路回声参考。
+// 双麦 WakeNet + MIC3 回采参考：MMR 输入。
 class CustomAudioCodec : public BoxAudioCodec {
 public:
     explicit CustomAudioCodec(i2c_master_bus_handle_t i2c_bus)
@@ -48,7 +48,7 @@ public:
                         28.0f,  // 物理 MIC1 和 MIC2 的增益
                         2,      // 物理 MIC3 作为播放回声参考输入
                         0.0f,
-                        2) {}   // 两只实体麦克风，另加一路回声参考
+                        2) {}   // 双麦 + 回声参考
 
     void EnableOutput(bool enable) override {
         BoxAudioCodec::EnableOutput(enable);

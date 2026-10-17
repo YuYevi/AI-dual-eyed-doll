@@ -149,6 +149,11 @@ bool AfeAudioEngine::Initialize(AudioCodec* codec, int frame_duration_ms, srmode
     afe_config->wakenet_model_name = wake_detector_ == WakeDetector::kWakeNet
         ? wakenet_model_name
         : nullptr;
+    // MMR has two microphone channels plus one playback reference. Select the
+    // 2-microphone WakeNet mode explicitly instead of deriving it from 3 inputs.
+    if (wake_detector_ == WakeDetector::kWakeNet) {
+        afe_config->wakenet_mode = microphone_count > 1 ? DET_MODE_2CH_90 : DET_MODE_90;
+    }
     afe_config->agc_init = false;
     afe_config->memory_alloc_mode = AFE_MEMORY_ALLOC_MORE_PSRAM;
 

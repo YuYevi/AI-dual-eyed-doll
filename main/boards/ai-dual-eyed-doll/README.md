@@ -4,7 +4,7 @@
 
 ## 硬件状态
 
-- 双眼为两块 160x160、4 线 SPI GC9D01N 显示屏，均不使用水平镜像，分别显示左、右眼原始动画。
+- 双眼为两块 128x128、0.9 英寸 BOE ST7735S SPI 显示屏，两屏均不使用水平镜像，分别显示左、右眼原始动画。
 - ES8311 output Codec and ES7210 input Codec; two analog microphones connect to ES7210 MIC1 and MIC2. MIC3 is the AEC playback loopback reference channel.
 - TCA9554 is populated. The two TTP233H touch outputs connect directly to ESP GPIO39/GPIO38; AHLB=0 and TOG=0, so they are active HIGH, not active low.
 - IMU 和 SD 未焊接。固件仅将 TCA9554 全部端口配置为输入，不依赖 IMU 或 SD。
@@ -62,7 +62,13 @@ python scripts/build.py ai-dual-eyed-doll
 
 使用原有 `partitions/v2/16m.csv`：NVS 为 16 KB（0x9000-0xCFFF），`otadata` 位于 0xD000。原始 NVS 备份为 `build/v02-original-nvs-COM33.bin`。
 
-当前双眼动画来自 `docs/资源` 中的左右眼 GIF，包含平静、开心、惊讶、生气、难过、困倦、害羞、害怕八种表情。`scripts/pack_dual_eye_assets.py` 将动画转换为 RGB565 压缩差分帧，打包到 `assets/dual_eye_assets.pack`，并保留语音唤醒模型。
+当前双眼动画来自 `docs/LCD资源动画/gif` 中的左右眼 GIF，包含平静、开心、惊讶、生气、难过、困倦、害羞、害怕八种表情。`scripts/pack_dual_eye_assets.py` 将原始 GIF 缩放到 128x128 后转换为 RGB565 压缩差分帧，打包到 `assets/dual_eye_assets.pack`，并保留语音唤醒模型。
+
+BOE 面板使用 ESP-IDF ST7789 兼容驱动，GRAM 偏移 `(2, 2)`、BGR 色序与颜色反转；双屏共享复位和 SPI，但各自使用独立片选。更换屏幕后可从原图重新生成资源包（脚本会自动保留现有包中的 `srmodels.bin`）：
+
+```bash
+python scripts/pack_dual_eye_assets.py --output build/dual_eye_128.anim --package-output main/boards/ai-dual-eyed-doll/assets/dual_eye_assets.pack
+```
 
 更换表情后必须烧录应用和 `assets` 分区，不能只烧录应用。构建会将资源包加入 `build/flash_args` 的 `0x800000` 项，可使用完整烧录命令：
 

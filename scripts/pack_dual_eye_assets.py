@@ -5,7 +5,7 @@ from __future__ import annotations
 import argparse, hashlib, json, struct, subprocess, zlib
 from pathlib import Path
 
-WIDTH = HEIGHT = 160
+WIDTH = HEIGHT = 128
 FPS = 25
 MAGIC = b"DEYEANIM"
 VERSION = 1
@@ -18,7 +18,8 @@ FRAME_HEADER = struct.Struct("<I")
 def decode(path: Path) -> list[bytes]:
     raw = subprocess.check_output([
         "ffmpeg", "-v", "error", "-i", str(path),
-        "-f", "rawvideo", "-pix_fmt", "rgb24", "-"
+        "-vf", f"scale={WIDTH}:{HEIGHT}:flags=lanczos",
+        "-f", "rawvideo", "-pix_fmt", "rgb24", "-",
     ])
     rgb_size = WIDTH * HEIGHT * 3
     if len(raw) % rgb_size:
@@ -76,9 +77,30 @@ def package_assets(animation: bytes, srmodels: bytes | None = None) -> bytes:
     return struct.pack("<III", len(entries), sum(combined) & 0xFFFF, len(combined)) + combined
 
 
+def read_existing_srmodels(path: Path) -> bytes | None:
+    if not path.exists():
+        return None
+    package = path.read_bytes()
+    if len(package) < 12:
+        raise ValueError(f"{path}: truncated asset package")
+    count, checksum, size = struct.unpack_from("<III", package)
+    entry_size = ASSET_TABLE.size
+    data_offset = 12 + count * entry_size
+    if data_offset > len(package) or size != len(package) - 12 or checksum != sum(package[12:]) & 0xFFFF:
+        raise ValueError(f"{path}: invalid asset package")
+    for index in range(count):
+        name, length, offset, _, _ = ASSET_TABLE.unpack_from(package, 12 + index * entry_size)
+        if name.split(b"\0", 1)[0] != b"srmodels.bin":
+            continue
+        start = data_offset + offset
+        if start + 2 + length > len(package) or package[start:start + 2] != b"ZZ":
+            raise ValueError(f"{path}: invalid srmodels.bin entry")
+        return package[start + 2:start + 2 + length]
+    raise ValueError(f"{path}: srmodels.bin is missing")
+
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--input", type=Path, default=Path("docs/资源"))
+    parser.add_argument("--input", type=Path, default=Path("docs/LCD资源动画/gif"))
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--package-output", type=Path)
     parser.add_argument(
@@ -120,7 +142,8 @@ def main() -> None:
     args.output.write_bytes(payload)
     if args.package_output:
         args.package_output.parent.mkdir(parents=True, exist_ok=True)
-        srmodels = args.srmodels.read_bytes() if args.srmodels else None
+        srmodels = (args.srmodels.read_bytes() if args.srmodels else
+                    read_existing_srmodels(args.package_output))
         args.package_output.write_bytes(package_assets(payload, srmodels))
         print(f"wrote {args.package_output} ({args.package_output.stat().st_size} bytes)")
     print(f"wrote {args.output} ({len(payload)} bytes, {len(streams)} unique streams)")

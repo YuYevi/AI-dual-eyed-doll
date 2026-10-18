@@ -27,7 +27,9 @@
 
 ## 音频与按键
 
-音频输入配置为三通道、24 kHz，启用设备端 AEC；MMR Codec 新增设备 AEC 24 kHz 支持。运行时会将输入重采样为 16 kHz 后交给语音处理。
+音频复用官方 `BoxAudioCodec`，板级控制功放 GPIO16。配置为单麦 MMR：MIC1 为人声，MIC3 为回声参考；24 kHz 采样，启用设备端 AEC。ES7210 选择 TDM 时隙 0、1，GPIO40 保持纯输入、无上下拉。
+
+原自定义 `DollAudioCodec` 已移除。AI 对话和 AEC 效果尚未单独验收。
 
 固件操作映射：
 

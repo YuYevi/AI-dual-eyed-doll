@@ -40,18 +40,22 @@
 // 复用上游 SZPI 的驱动结构：一路人声麦克风和一路回声参考。
 class CustomAudioCodec : public BoxAudioCodec {
 public:
-    explicit CustomAudioCodec(i2c_master_bus_handle_t i2c_bus)
+    CustomAudioCodec(i2c_master_bus_handle_t i2c_bus)
         : BoxAudioCodec(i2c_bus, AUDIO_INPUT_SAMPLE_RATE, AUDIO_OUTPUT_SAMPLE_RATE,
                         AUDIO_I2S_GPIO_MCLK, AUDIO_I2S_GPIO_BCLK, AUDIO_I2S_GPIO_WS,
                         AUDIO_I2S_GPIO_DOUT, AUDIO_I2S_GPIO_DIN, GPIO_NUM_NC,
                         AUDIO_CODEC_ES8311_ADDR, AUDIO_CODEC_ES7210_ADDR, AUDIO_INPUT_REFERENCE,
                         28.0f,  // 物理 MIC1 的增益
                         2,      // 物理 MIC3 作为播放回声参考输入
-                        0.0f) {} // 与上游 SZPI 相同：MIC1 + MIC3 回声参考
+                        0.0f) {}
 
-    void EnableOutput(bool enable) override {
+    virtual void EnableOutput(bool enable) override {
         BoxAudioCodec::EnableOutput(enable);
-        ESP_ERROR_CHECK(gpio_set_level(AUDIO_PA_ENABLE_GPIO, enable ? 1 : 0));
+        if (enable) {
+            ESP_ERROR_CHECK(gpio_set_level(AUDIO_PA_ENABLE_GPIO, 1));
+        } else {
+            ESP_ERROR_CHECK(gpio_set_level(AUDIO_PA_ENABLE_GPIO, 0));
+        }
     }
 };
 
@@ -128,17 +132,8 @@ private:
         ESP_ERROR_CHECK(gpio_set_direction(pin, GPIO_MODE_OUTPUT));
     }
 
-    static void ConfigureAudioInput() {
-        // DIN 由 ES7210 驱动。gpio_reset_pin() 会开启上拉，而设置输入方向
-        // 和 I2S 初始化都不会清除它；必须同时撤销输出及内部上下拉。
-        ESP_ERROR_CHECK(gpio_hold_dis(AUDIO_I2S_GPIO_DIN));
-        ESP_ERROR_CHECK(gpio_set_direction(AUDIO_I2S_GPIO_DIN, GPIO_MODE_INPUT));
-        ESP_ERROR_CHECK(gpio_set_pull_mode(AUDIO_I2S_GPIO_DIN, GPIO_FLOATING));
-    }
-
     void InitializePowerOff() {
         gpio_deep_sleep_hold_dis();
-        ConfigureAudioInput();
         // 在解除 GPIO 输出电平保持前，先预设关闭电平。
         for (auto pin : {POWER_EN1_GPIO, POWER_EN2_GPIO, AUDIO_PA_ENABLE_GPIO,
                          DISPLAY_BACKLIGHT_PIN, RUN_LED_GPIO}) {
@@ -193,8 +188,6 @@ private:
         ESP_ERROR_CHECK(rtc_gpio_pulldown_dis(PWR_BUTTON_GPIO));
         ESP_ERROR_CHECK(esp_sleep_enable_ext0_wakeup(PWR_BUTTON_GPIO, POWER_BUTTON_ACTIVE_LEVEL));
 
-        // DIN 在关机和下次唤醒期间也保持无上下拉的输入，不能加入输出保护列表。
-        ConfigureAudioInput();
         // 关闭任一外设电源前，先将 MCU 驱动的信号保持为低电平。
         // 电平保持可防止后台 SPI/I2S 活动改变引脚电平。
         // 保持调度器运行，直至 IDF 执行进入睡眠前的关闭流程。
@@ -265,7 +258,6 @@ private:
     }
 
     void EnablePeripheralPower() {
-        ConfigureAudioInput();
         ConfigureOutput(POWER_EN1_GPIO, 0);
         ConfigureOutput(POWER_EN2_GPIO, 1);
         ConfigureOutput(RUN_LED_GPIO, 1);

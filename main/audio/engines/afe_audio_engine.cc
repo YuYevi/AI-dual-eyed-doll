@@ -126,14 +126,30 @@ bool AfeAudioEngine::Initialize(AudioCodec* codec, int frame_duration_ms, srmode
         ? nullptr
         : esp_srmodel_filter(models_, ESP_VADN_PREFIX, nullptr);
     afe_config_t* afe_config = afe_config_init(
-        input_format.c_str(), models_, AFE_TYPE_VC, AFE_MODE_HIGH_PERF);
+        /*
+         * AFE 类型共 4 种：
+         * AFE_TYPE_SR：语音识别，不含非线性噪声抑制。
+         * AFE_TYPE_VC：16 kHz 语音通话，含非线性噪声抑制。
+         * AFE_TYPE_VC_8K：8 kHz 语音通话，输入必须为 8 kHz。
+         * AFE_TYPE_FD：全双工场景，含非线性噪声抑制。
+         */
+        input_format.c_str(), models_, AFE_TYPE_SR, AFE_MODE_HIGH_PERF);
     if (afe_config == nullptr) {
         ESP_LOGE(TAG, "Failed to create AFE configuration");
         return false;
     }
 
     afe_config->aec_init = codec_->input_reference();
-    afe_config->aec_mode = AEC_MODE_VOIP_HIGH_PERF;
+    /*
+     * AEC 模式共 6 种：
+     * AEC_MODE_SR_LOW_COST：语音识别，低资源开销。
+     * AEC_MODE_SR_HIGH_PERF：语音识别，高性能。
+     * AEC_MODE_VOIP_LOW_COST：语音通话，低资源开销。
+     * AEC_MODE_VOIP_HIGH_PERF：语音通话，高性能。
+     * AEC_MODE_FD_LOW_COST：全双工，低资源开销。
+     * AEC_MODE_FD_HIGH_PERF：全双工，高性能。
+     */
+    afe_config->aec_mode = AEC_MODE_SR_HIGH_PERF;
     afe_config->aec_nlp_level = AEC_NLP_LEVEL_VERYAGGR;
     afe_config->ns_init = false;
     afe_config->vad_init = kUseAfeForVoiceProcessing;

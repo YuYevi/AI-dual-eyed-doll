@@ -601,7 +601,7 @@ CONFIG_PARTITION_TABLE_MD5=y
 #
 # Xiaozhi Assistant
 #
-CONFIG_OTA_URL="https://api.tenclass.net/xiaozhi/ota/"
+CONFIG_OTA_URL="https://www.xinyhx.com/apicyhx/device/ota/"
 # CONFIG_FLASH_NONE_ASSETS is not set
 # CONFIG_FLASH_DEFAULT_ASSETS is not set
 CONFIG_FLASH_CUSTOM_ASSETS=y

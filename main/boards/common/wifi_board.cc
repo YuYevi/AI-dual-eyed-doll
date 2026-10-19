@@ -119,10 +119,6 @@ void WifiBoard::OnNetworkEvent(NetworkEvent event, const std::string& data) {
         case NetworkEvent::Connected:
             // Stop timeout timer
             esp_timer_stop(connect_timer_);
-#ifdef CONFIG_USE_ESP_BLUFI_WIFI_PROVISIONING
-            // make sure blufi resources has been released
-            Blufi::GetInstance().deinit();
-#endif
             in_config_mode_ = false;
             ESP_LOGI(TAG, "Connected to WiFi: %s", data.c_str());
             break;
@@ -188,7 +184,7 @@ void WifiBoard::StartWifiConfigMode() {
 #elif CONFIG_USE_ESP_BLUFI_WIFI_PROVISIONING
     auto &blufi = Blufi::GetInstance();
     // initialize esp-blufi protocol
-    esp_err_t ret = blufi.init();
+    esp_err_t ret = blufi.StartBindMode(BleSetupMode::WIFI_PROVISION_AND_BIND);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Failed to initialize BluFi provisioning: %s", esp_err_to_name(ret));
         return;
@@ -198,6 +194,35 @@ void WifiBoard::StartWifiConfigMode() {
         Application::GetInstance().Alert(Lang::Strings::WIFI_CONFIG_MODE,
             Lang::Strings::ENTERING_WIFI_CONFIG_MODE, "gear", Lang::Sounds::OGG_WIFICONFIG);
     });
+#endif
+}
+
+bool WifiBoard::EnterBleBindMode(BleSetupMode setup_mode) {
+#ifdef CONFIG_USE_ESP_BLUFI_WIFI_PROVISIONING
+    if (Blufi::GetInstance().StartBindMode(setup_mode) != ESP_OK) {
+        return false;
+    }
+    ble_bind_mode_active_ = true;
+    return true;
+#else
+    return Board::EnterBleBindMode(setup_mode);
+#endif
+}
+
+void WifiBoard::ExitBleBindMode() {
+    if (!ble_bind_mode_active_.exchange(false)) {
+        return;
+    }
+#ifdef CONFIG_USE_ESP_BLUFI_WIFI_PROVISIONING
+    Blufi::GetInstance().deinit();
+#endif
+}
+
+bool WifiBoard::IsBleBindModeActive() const {
+#ifdef CONFIG_USE_ESP_BLUFI_WIFI_PROVISIONING
+    return ble_bind_mode_active_ && Blufi::GetInstance().IsActive();
+#else
+    return false;
 #endif
 }
 

@@ -1,6 +1,8 @@
 #pragma once
 
 #include <cassert>
+#include <atomic>
+#include "board.h"
 #include <cstring>
 #include <vector>
 #include "esp_blufi_api.h"
@@ -34,6 +36,8 @@ public:
      * @return ESP_OK on success, otherwise an error code.
      */
     esp_err_t init();
+    esp_err_t StartBindMode(BleSetupMode setup_mode);
+    bool IsActive() const { return inited_ && !m_deinited && !m_deinit_in_progress_; }
 
     /**
      * @brief Deinitializes Blufi and the Bluetooth stack.
@@ -47,11 +51,19 @@ public:
     Blufi &operator=(const Blufi &) = delete;
 
 private:
-    bool inited_ = false;
+    std::atomic_bool inited_{false};
+    std::atomic_bool m_lifecycle_busy_{false};
+    std::atomic_bool m_deinit_in_progress_{false};
+    std::atomic_bool m_connect_task_active_{false};
+    std::atomic<BleSetupMode> m_setup_mode_{BleSetupMode::WIFI_PROVISION_AND_BIND};
+    esp_event_handler_instance_t m_scan_event_instance = nullptr;
 
     Blufi();
 
     ~Blufi();
+
+    // Caller holds m_lifecycle_busy_.
+    esp_err_t _init_locked();
 
     // Initialization logic
     static esp_err_t _controller_init();
@@ -130,11 +142,11 @@ private:
 
     // State variables
     wifi_config_t m_sta_config{};
-    bool m_ble_is_connected;
+    std::atomic_bool m_ble_is_connected;
     bool m_sta_connected;
     bool m_sta_got_ip;
-    bool m_provisioned;
-    bool m_deinited;
+    std::atomic_bool m_provisioned;
+    std::atomic_bool m_deinited;
     uint8_t m_sta_bssid[6]{};
     uint8_t m_sta_ssid[32]{};
     int m_sta_ssid_len;

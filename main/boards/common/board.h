@@ -6,6 +6,7 @@
 #include <mqtt.h>
 #include <udp.h>
 #include <string>
+#include <cstdint>
 #include <functional>
 #include <network_interface.h>
 
@@ -37,6 +38,11 @@ enum class PowerSaveLevel {
     LOW_POWER,    // Maximum power saving (lowest power consumption)
     BALANCED,     // Medium power saving (balanced)
     PERFORMANCE,  // No power saving (maximum power consumption / full performance)
+};
+
+enum class BleSetupMode : uint8_t {
+    BIND_ONLY = 0x00,
+    WIFI_PROVISION_AND_BIND = 0x01,
 };
 
 // Network event callback type (event, data)
@@ -82,6 +88,12 @@ public:
     virtual void SetPowerSaveLevel(PowerSaveLevel level) = 0;
     virtual std::string GetBoardJson() = 0;
     virtual std::string GetDeviceStatusJson() = 0;
+    virtual bool EnterBleBindMode(BleSetupMode setup_mode = BleSetupMode::BIND_ONLY) {
+        (void)setup_mode;
+        return false;
+    }
+    virtual void ExitBleBindMode() {}
+    virtual bool IsBleBindModeActive() const { return false; }
 };
 
 #define DECLARE_BOARD(BOARD_CLASS_NAME) \

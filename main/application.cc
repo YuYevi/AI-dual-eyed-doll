@@ -447,6 +447,9 @@ bool Application::CheckNewVersion() {
     int retry_delay = 10;  // Initial retry delay in seconds
 
     auto& board = Board::GetInstance();
+#ifdef CONFIG_USE_ESP_BLUFI_WIFI_PROVISIONING
+    std::string activation_code_shown;
+#endif
     while (true) {
         auto display = board.GetDisplay();
         display->SetStatus(Lang::Strings::CHECKING_NEW_VERSION);
@@ -503,10 +506,28 @@ bool Application::CheckNewVersion() {
         ota_->MarkCurrentVersionValid();
         if (!ota_->HasActivationCode() && !ota_->HasActivationChallenge()) {
             // 只有 OTA 成功响应且无待处理激活要求时，才确认显示就绪。
+            board.ExitBleBindMode();
             return true;
         }
 
         display->SetStatus(Lang::Strings::ACTIVATION);
+#ifdef CONFIG_USE_ESP_BLUFI_WIFI_PROVISIONING
+        // Normal codes are completed by the app; poll the existing cloud endpoint.
+        if (ota_->HasActivationCode()) {
+            const auto& code = ota_->GetActivationCode();
+            if (activation_code_shown != code) {
+                ShowActivationCode(code, ota_->GetActivationMessage());
+                activation_code_shown = code;
+            }
+            if (!board.IsBleBindModeActive() &&
+                !board.EnterBleBindMode(BleSetupMode::BIND_ONLY)) {
+                ESP_LOGW(TAG, "Bind-only BLE mode is not ready, retrying");
+            }
+            vTaskDelay(pdMS_TO_TICKS(3000));
+            continue;
+        }
+#endif
+        // Preserve the original activation flow when BluFi is not configured.
         // Activation code is shown to the user and waiting for the user to input
         if (ota_->HasActivationCode()) {
             ShowActivationCode(ota_->GetActivationCode(), ota_->GetActivationMessage());
@@ -746,6 +767,7 @@ bool Application::InitializeProtocol() {
 }
 
 void Application::ShowActivationCode(const std::string& code, const std::string& message) {
+    /*
     struct digit_sound {
         char digit;
         const std::string_view& sound;
@@ -756,10 +778,11 @@ void Application::ShowActivationCode(const std::string& code, const std::string&
          digit_sound{'4', Lang::Sounds::OGG_4}, digit_sound{'5', Lang::Sounds::OGG_5},
          digit_sound{'6', Lang::Sounds::OGG_6}, digit_sound{'7', Lang::Sounds::OGG_7},
          digit_sound{'8', Lang::Sounds::OGG_8}, digit_sound{'9', Lang::Sounds::OGG_9}}};
+    */
 
-    // This sentence uses 9KB of SRAM, so we need to wait for it to finish
-    Alert(Lang::Strings::ACTIVATION, message.c_str(), "link", Lang::Sounds::OGG_ACTIVATION);
+    Alert(Lang::Strings::ACTIVATION, message.c_str(), "link", Lang::Sounds::OGG_BT_PAIRING_ON);
 
+    /*
     for (const auto& digit : code) {
         auto it = std::find_if(digit_sounds.begin(), digit_sounds.end(),
                                [digit](const digit_sound& ds) { return ds.digit == digit; });
@@ -767,6 +790,8 @@ void Application::ShowActivationCode(const std::string& code, const std::string&
             audio_service_.PlaySound(it->sound);
         }
     }
+    */
+    (void)code;
 }
 
 void Application::Alert(const char* status, const char* message, const char* emotion,

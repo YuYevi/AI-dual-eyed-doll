@@ -4,6 +4,9 @@
 #include "assets/lang_config.h"
 #include "settings.h"
 #include <esp_log.h>
+#ifdef CONFIG_USE_ESP_BLUFI_WIFI_PROVISIONING
+#include "blufi.h"
+#endif
 
 static const char *TAG = "DualNetworkBoard";
 
@@ -77,6 +80,49 @@ void DualNetworkBoard::SetNetworkEventCallback(NetworkEventCallback callback) {
     current_board_->SetNetworkEventCallback(std::move(callback));
 }
 
+bool DualNetworkBoard::EnterBleBindMode(BleSetupMode setup_mode) {
+    if (network_type_ == NetworkType::WIFI) {
+        return current_board_->EnterBleBindMode(setup_mode);
+    }
+#ifdef CONFIG_USE_ESP_BLUFI_WIFI_PROVISIONING
+    // Cellular binding must never start WiFi provisioning.
+    if (setup_mode != BleSetupMode::BIND_ONLY) {
+        return false;
+    }
+    const auto ret = Blufi::GetInstance().StartBindMode(BleSetupMode::BIND_ONLY);
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "Failed to start bind-only BLE: %s", esp_err_to_name(ret));
+        return false;
+    }
+    ble_bind_mode_active_ = true;
+    return true;
+#else
+    return Board::EnterBleBindMode(setup_mode);
+#endif
+}
+
+void DualNetworkBoard::ExitBleBindMode() {
+    if (network_type_ == NetworkType::WIFI) {
+        current_board_->ExitBleBindMode();
+        return;
+    }
+#ifdef CONFIG_USE_ESP_BLUFI_WIFI_PROVISIONING
+    if (ble_bind_mode_active_ && Blufi::GetInstance().deinit() == ESP_OK) {
+        ble_bind_mode_active_ = false;
+    }
+#endif
+}
+
+bool DualNetworkBoard::IsBleBindModeActive() const {
+    if (network_type_ == NetworkType::WIFI) {
+        return current_board_->IsBleBindModeActive();
+    }
+#ifdef CONFIG_USE_ESP_BLUFI_WIFI_PROVISIONING
+    return ble_bind_mode_active_ && Blufi::GetInstance().IsActive();
+#else
+    return false;
+#endif
+}
 NetworkInterface* DualNetworkBoard::GetNetwork() {
     return current_board_->GetNetwork();
 }

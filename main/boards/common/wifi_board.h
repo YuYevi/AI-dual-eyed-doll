@@ -2,6 +2,7 @@
 #define WIFI_BOARD_H
 
 #include "board.h"
+#include <atomic>
 #include <freertos/FreeRTOS.h>
 #include <freertos/event_groups.h>
 #include <esp_timer.h>
@@ -10,6 +11,7 @@ class WifiBoard : public Board {
 protected:
     esp_timer_handle_t connect_timer_ = nullptr;
     bool in_config_mode_ = false;
+    std::atomic_bool ble_bind_mode_active_{false};
     NetworkEventCallback network_event_callback_ = nullptr;
 
     virtual std::string GetBoardJson() override;
@@ -54,6 +56,9 @@ public:
     virtual void SetPowerSaveLevel(PowerSaveLevel level) override;
     virtual AudioCodec* GetAudioCodec() override { return nullptr; }
     virtual std::string GetDeviceStatusJson() override;
+    bool EnterBleBindMode(BleSetupMode setup_mode = BleSetupMode::BIND_ONLY) override;
+    void ExitBleBindMode() override;
+    bool IsBleBindModeActive() const override;
     
     /**
      * Enter WiFi configuration mode (thread-safe, can be called from any task)

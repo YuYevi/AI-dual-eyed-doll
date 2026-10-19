@@ -3,6 +3,7 @@
 
 #include "board.h"
 #include "wifi_board.h"
+#include <atomic>
 #include "ml307_board.h"
 #include <memory>
 
@@ -18,6 +19,8 @@ private:
     // 使用基类指针存储当前活动的板卡
     std::unique_ptr<Board> current_board_;
     NetworkType network_type_ = NetworkType::ML307;  // Default to ML307
+    // Only the ML307 path owns a BLE session directly.
+    std::atomic_bool ble_bind_mode_active_{false};
 
     // ML307的引脚配置
     gpio_num_t ml307_tx_pin_;
@@ -51,6 +54,9 @@ public:
     virtual void StartNetwork() override;
     virtual void SetNetworkEventCallback(NetworkEventCallback callback) override;
     virtual NetworkInterface* GetNetwork() override;
+    bool EnterBleBindMode(BleSetupMode setup_mode = BleSetupMode::BIND_ONLY) override;
+    void ExitBleBindMode() override;
+    bool IsBleBindModeActive() const override;
     virtual const char* GetNetworkStateIcon() override;
     virtual void SetPowerSaveLevel(PowerSaveLevel level) override;
     virtual std::string GetBoardJson() override;

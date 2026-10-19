@@ -146,6 +146,12 @@ private:
 
     std::function<void(const std::string&)> mcp_broadcast_callback_;
 
+    // 显示就绪状态由主任务维护；后台任务通过 Schedule() 投递更新。
+    bool network_connected_ = false;
+    bool activation_ready_ = false;
+    bool protocol_network_error_ = false;
+    void UpdateNetworkDisplay();
+
     bool has_server_time_ = false;
     bool aborted_ = false;
     bool assets_version_checked_ = false;
@@ -178,8 +184,8 @@ private:
 
     // Helper methods
     void CheckAssetsVersion();
-    void CheckNewVersion();
-    void InitializeProtocol();
+    bool CheckNewVersion();
+    bool InitializeProtocol();
     void ShowActivationCode(const std::string& code, const std::string& message);
     void SetListeningMode(ListeningMode mode);
     ListeningMode GetDefaultListeningMode() const;

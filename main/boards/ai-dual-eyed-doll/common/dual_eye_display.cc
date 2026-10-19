@@ -1,12 +1,14 @@
 #include "dual_eye_display.h"
 
 #include "assets.h"
+#include "board.h"
 #include "config.h"
 
 #include <cstdlib>
 #include <cstring>
 
 #include <esp_heap_caps.h>
+#include <esp_random.h>
 #include <esp_log.h>
 #include <miniz.h>
 
@@ -16,7 +18,8 @@
 #define EYE_BYTES (EYE_PIXELS * sizeof(uint16_t))
 #define ANIMATION_MAGIC "DEYEANIM"
 #define ANIMATION_VERSION 1
-#define ANIMATION_MAX_COUNT 8
+#define ANIMATION_MAX_COUNT 14
+#define NORMAL_ANIMATION_COUNT 8
 #define ANIMATION_FRAME_INTERVAL_MS 40
 
 // 这是 scripts/pack_dual_eye_assets.py 写入闪存的表结构格式。
@@ -101,7 +104,14 @@ DualEyeDisplay::DualEyeDisplay(esp_lcd_panel_io_handle_t left_io,
         return;
     }
     ESP_LOGI(TAG, "Both eye GRAM cleared with display off (DMA complete)");
-    if (!LoadAnimations() || !SelectAnimation("calm")) {
+    if (!LoadAnimations()) {
+        ESP_LOGE(TAG, "Failed to load dual-eye animations; flash the board's assets partition");
+        return;
+    }
+    const bool has_power_on = FindAnimation("power_on") != nullptr;
+    playback_mode_ = has_power_on ? PlaybackMode::kPowerOn : PlaybackMode::kNormal;
+    power_on_pending_ = has_power_on;
+    if (!SelectAnimation(has_power_on ? "power_on" : "calm")) {
         ESP_LOGE(TAG, "Failed to load dual-eye animations; flash the board's assets partition");
         return;
     }
@@ -113,7 +123,7 @@ DualEyeDisplay::DualEyeDisplay(esp_lcd_panel_io_handle_t left_io,
         return;
     }
     ready_ = true;
-    ESP_LOGI(TAG, "Startup ready: both calm first frames transferred (DMA complete)");
+    ESP_LOGI(TAG, "Startup ready: both first frames transferred (DMA complete)");
 }
 
 DualEyeDisplay::~DualEyeDisplay() {
@@ -257,8 +267,38 @@ bool DualEyeDisplay::LoadAnimations() {
     return true;
 }
 
+const DualEyeAnimation* DualEyeDisplay::FindAnimation(const char* name) const {
+    if (name == nullptr) return nullptr;
+    for (size_t i = 0; i < animation_count_; ++i) {
+        if (strcmp(animations_[i].name, name) == 0) return &animations_[i];
+    }
+    return nullptr;
+}
+
+bool DualEyeDisplay::StartAnimation(const char* name, PlaybackMode mode) {
+    const DualEyeAnimation* next = FindAnimation(name);
+    if (next == nullptr) {
+        return false;
+    }
+    const bool changed = animation_ != next || playback_mode_ != mode;
+    playback_mode_ = mode;
+    if (!changed) {
+        return true;
+    }
+    // 仅由任务选择动画：首帧由 AnimationTask 渲染，setter 不直接渲染。
+    animation_ = next;
+    animation_frame_ = 0;
+    memset(left_state_, 0, EYE_BYTES);
+    memset(right_state_, 0, EYE_BYTES);
+    current_emotion_ = next->name;
+    if (changed) {
+        ESP_LOGI(TAG, "Animation switched: %s", current_emotion_);
+    }
+    return true;
+}
+
 bool DualEyeDisplay::SelectAnimation(const char* emotion) {
-    const char* mapped = MapEmotion(emotion);
+    const char* mapped = FindAnimation(emotion) != nullptr ? emotion : MapEmotion(emotion);
     const char* previous = current_emotion_ != nullptr ? current_emotion_ : "(none)";
     for (size_t i = 0; i < animation_count_; ++i) {
         if (strcmp(animations_[i].name, mapped) == 0) {
@@ -378,30 +418,132 @@ void DualEyeDisplay::AnimationTaskEntry(void* arg) {
 }
 
 void DualEyeDisplay::AnimationTask() {
-    TickType_t wake_time = xTaskGetTickCount();
+    const TickType_t tick_interval = pdMS_TO_TICKS(ANIMATION_FRAME_INTERVAL_MS);
+    TickType_t last_frame_start = xTaskGetTickCount();
+    TickType_t deadline_base = last_frame_start;
+    TickType_t frame_interval = tick_interval;
     while (true) {
-        vTaskDelayUntil(&wake_time, pdMS_TO_TICKS(ANIMATION_FRAME_INTERVAL_MS));
+        // 目标是帧起始时间间隔为 40ms，并计入解码和 DMA 耗时。
+        // 超时后重新计算基准，不立即补发积压帧。
+        vTaskDelayUntil(&deadline_base, tick_interval);
         if (!Lock(20)) {
+            deadline_base = xTaskGetTickCount();
             continue;
         }
+        const TickType_t iteration_start = xTaskGetTickCount();
+        deadline_base = iteration_start;
         if (screen_enabled_ && animation_ != nullptr) {
-            if (animation_frame_ >= animation_->frame_count) {
+            const bool frame_due = static_cast<TickType_t>(xTaskGetTickCount() -
+                                                          last_frame_start) >= frame_interval;
+            // 被打断的开机动画保持待播放状态，并从第 0 帧重新开始。
+            // 最后一帧的起始间隔结束后，才标记动画完成。
+            if (frame_due && animation_frame_ >= animation_->frame_count) {
+                CompleteAnimation();
                 animation_frame_ = 0;
                 memset(left_state_, 0, EYE_BYTES);
                 memset(right_state_, 0, EYE_BYTES);
             }
-            if (RenderFrame(animation_frame_)) {
-                ++animation_frame_;
-            } else {
-                // 帧差分可能已应用过。重复应用
-                // 会通过 XOR 将该帧还原，并破坏后续所有帧。
-                ESP_LOGE(TAG, "Stopping animation after a failed frame");
-                animation_ = nullptr;
-                current_emotion_ = nullptr;
+            // 即使低电量帧的保持时间更长，也要每 40ms 轮询一次状态。
+            UpdatePlayback();
+            if (animation_ != nullptr && (animation_frame_ == 0 || frame_due)) {
+                const TickType_t frame_start = xTaskGetTickCount();
+                if (RenderFrame(animation_frame_)) {
+                    ++animation_frame_;
+                    last_frame_start = frame_start;
+                    frame_interval = tick_interval;
+                    if (playback_mode_ == PlaybackMode::kBattery) {
+                        const TickType_t battery_interval =
+                            pdMS_TO_TICKS(3000) / animation_->frame_count;
+                        if (battery_interval > frame_interval) {
+                            frame_interval = battery_interval;
+                        }
+                    }
+                } else {
+                    // 解码或传输失败后，不要重试 XOR 差分帧。
+                    ESP_LOGE(TAG, "Stopping animation after a failed frame");
+                    animation_ = nullptr;
+                    current_emotion_ = nullptr;
+                }
             }
         }
         Unlock();
+        const TickType_t iteration_done = xTaskGetTickCount();
+        if (static_cast<TickType_t>(iteration_done - iteration_start) >= tick_interval) {
+            // 慢帧会降低实际 FPS。重新设置截止时间，不要立即连续渲染多帧来偿还调度欠账。
+            deadline_base = iteration_done;
+        }
     }
+}
+
+void DualEyeDisplay::UpdatePlayback() {
+    if (low_battery_pending_) {
+        if (StartAnimation("battery", PlaybackMode::kBattery)) {
+            return;
+        }
+        low_battery_pending_ = false;  // 旧的八动画资源包没有低电量提示。
+    }
+    if (power_on_pending_) {
+        if (StartAnimation("power_on", PlaybackMode::kPowerOn)) {
+            return;
+        }
+        power_on_pending_ = false;
+    }
+    if (!network_connected_ || !network_activated_) {
+        if (StartAnimation(network_is_wifi_ ? "network_wifi" : "network4g",
+                           PlaybackMode::kNetwork)) {
+            return;
+        }
+    }
+    if (standby_requested_) {
+        if (standby_enter_pending_) {
+            if (StartAnimation("standby", PlaybackMode::kStandbyEnter)) {
+                return;
+            }
+            standby_enter_pending_ = false;
+            standby_hold_duration_ = 0;
+        }
+        const TickType_t now = xTaskGetTickCount();
+        // 无符号时间差计算也能正确处理 FreeRTOS tick 回绕。
+        if (standby_hold_duration_ == 0 ||
+            static_cast<TickType_t>(now - standby_hold_started_) >= standby_hold_duration_) {
+            if (standby_hold_duration_ != 0) {
+                standby_sleepy_ = !standby_sleepy_;
+            }
+            standby_hold_started_ = now;
+            standby_hold_duration_ = pdMS_TO_TICKS(30000 + esp_random() % 30001);
+        }
+        if (StartAnimation(standby_sleepy_ ? "sleepy" : "calm", PlaybackMode::kStandbyLoop)) {
+            return;
+        }
+    } else if (wake_pending_) {
+        if (StartAnimation("wake", PlaybackMode::kWake)) {
+            return;
+        }
+        wake_pending_ = false;
+    }
+    StartAnimation(requested_emotion_, PlaybackMode::kNormal);
+}
+
+void DualEyeDisplay::CompleteAnimation() {
+    switch (playback_mode_) {
+    case PlaybackMode::kBattery:
+        low_battery_pending_ = false;
+        break;
+    case PlaybackMode::kPowerOn:
+        power_on_pending_ = false;
+        break;
+    case PlaybackMode::kStandbyEnter:
+        standby_enter_pending_ = false;
+        standby_hold_duration_ = 0;
+        break;
+    case PlaybackMode::kWake:
+        wake_pending_ = false;
+        break;
+    default:
+        break;
+    }
+    // 这里不执行绘制：AnimationTask 在边界处重置差分状态，
+    // 然后由 UpdatePlayback 直接选择当前优先级最高的状态。
 }
 
 const char* DualEyeDisplay::MapEmotion(const char* emotion) {
@@ -442,37 +584,95 @@ const char* DualEyeDisplay::MapEmotion(const char* emotion) {
     return "calm";
 }
 
-void DualEyeDisplay::SetEmotion(const char* emotion) {
-    DisplayLockGuard lock(this);
-    if (!ready_ || frame_ == nullptr || left_state_ == nullptr || right_state_ == nullptr ||
-        decode_buffer_ == nullptr || decompressor_ == nullptr || flush_done_ == nullptr) {
-        return;
-    }
+void DualEyeDisplay::SetNormalEmotion(const char* emotion) {
     const char* mapped = MapEmotion(emotion);
-    if (animation_ != nullptr && current_emotion_ != nullptr &&
-        strcmp(current_emotion_, mapped) == 0) {
+    strncpy(requested_emotion_, mapped, sizeof(requested_emotion_) - 1);
+    requested_emotion_[sizeof(requested_emotion_) - 1] = '\0';
+}
+
+void DualEyeDisplay::SetEmotion(const char* emotion) {
+    if (!Lock()) {
         return;
     }
-    SelectAnimation(mapped);
+    SetNormalEmotion(emotion);
+    Unlock();
 }
 
 void DualEyeDisplay::ShowNextAnimation() {
-    DisplayLockGuard lock(this);
-    if (!ready_ || frame_ == nullptr || left_state_ == nullptr || right_state_ == nullptr ||
-        decode_buffer_ == nullptr || decompressor_ == nullptr || mutex_ == nullptr ||
-        flush_done_ == nullptr || left_panel_ == nullptr || right_panel_ == nullptr) {
+    if (!Lock()) {
         return;
     }
-
-    size_t next_index = 0;
-    for (size_t i = 0; i < animation_count_; ++i) {
-        if (animation_ == &animations_[i]) {
-            next_index = (i + 1) % animation_count_;
+    static constexpr const char* kNormalAnimations[NORMAL_ANIMATION_COUNT] = {
+        "calm", "happy", "surprised", "angry", "sad", "sleepy", "shy", "scared"};
+    size_t index = 0;
+    for (size_t i = 0; i < NORMAL_ANIMATION_COUNT; ++i) {
+        if (strcmp(requested_emotion_, kNormalAnimations[i]) == 0) {
+            index = (i + 1) % NORMAL_ANIMATION_COUNT;
             break;
         }
     }
-    // SelectAnimation 会重置 XOR 帧状态，并绘制新动画的首帧。
-    SelectAnimation(animations_[next_index].name);
+    SetNormalEmotion(kNormalAnimations[index]);
+    Unlock();
+}
+
+void DualEyeDisplay::UpdateNetworkState(bool is_wifi, bool connected, bool activated) {
+    if (!Lock()) {
+        return;
+    }
+    network_is_wifi_ = is_wifi;
+    network_connected_ = connected;
+    network_activated_ = activated;
+    Unlock();
+}
+
+void DualEyeDisplay::NotifyLowBattery() {
+    if (!Lock()) {
+        return;
+    }
+    // 多次通知会合并处理；已经播放中的低电量动画不会重新开始。
+    low_battery_pending_ = true;
+    Unlock();
+}
+
+void DualEyeDisplay::SetStandby(bool standby) {
+    if (!Lock()) {
+        return;
+    }
+    if (standby_requested_ != standby) {
+        standby_requested_ = standby;
+        standby_enter_pending_ = standby;
+        wake_pending_ = !standby;
+        standby_sleepy_ = false;
+        standby_hold_duration_ = 0;
+    }
+    Unlock();
+}
+
+void DualEyeDisplay::UpdateStatusBar(bool update_all) {
+    // 与 LVGL 保持一致：启动或完整刷新时不检测低电量边沿。
+    if (update_all) {
+        return;
+    }
+    int level = 0;
+    bool charging = false;
+    bool discharging = false;
+    // 主板采样可能获取其他锁或执行 IO，此处不要持有显示锁。
+    if (!Board::GetInstance().GetBatteryLevel(level, charging, discharging)) {
+        return;
+    }
+    if (!Lock()) {
+        return;
+    }
+    // LVGL 仅在未充电且电量 <= 0 时选择空电量图标。
+    const bool low = !charging && level <= 0 && discharging;
+    if (low && !low_battery_active_) {
+        low_battery_pending_ = true;
+    } else if (!low) {
+        // 下一次动画 tick 会重新计算优先级；保留开机、网络和待机状态。
+        low_battery_pending_ = false;
+    }
+    low_battery_active_ = low;
+    Unlock();
 }
 
 void DualEyeDisplay::SetStatus(const char* status) { ESP_LOGD(TAG, "SetStatus: %s", status); }

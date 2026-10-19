@@ -118,6 +118,22 @@ static const gc9d01_lcd_init_cmd_t kGc9d01InitCommands[] = {
     {0x28, nullptr, 0, 0},
 };
 
+// 网络类型信息由主板适配层维护，而不是由应用层维护。
+class BoardDualEyeDisplay : public DualEyeDisplay {
+public:
+    BoardDualEyeDisplay(DualNetworkBoard& board, esp_lcd_panel_io_handle_t left_io,
+                        esp_lcd_panel_handle_t left_panel, esp_lcd_panel_io_handle_t right_io,
+                        esp_lcd_panel_handle_t right_panel)
+        : DualEyeDisplay(left_io, left_panel, right_io, right_panel), board_(board) {}
+
+    void SetNetworkReady(bool connected, bool activated) override {
+        UpdateNetworkState(board_.GetNetworkType() == NetworkType::WIFI, connected, activated);
+    }
+
+private:
+    DualNetworkBoard& board_;
+};
+
 class AiDualEyedDollBoard : public DualNetworkBoard {
 private:
     // ---------- 外设对象与按键句柄 ----------
@@ -449,7 +465,8 @@ private:
         esp_lcd_panel_handle_t right_panel = nullptr;
         CreateEyePanel(DISPLAY_1_SPI_CS_GPIO, false, &left_io, &left_panel);
         CreateEyePanel(DISPLAY_2_SPI_CS_GPIO, false, &right_io, &right_panel);
-        display_ = new DualEyeDisplay(left_io, left_panel, right_io, right_panel);
+        display_ = new BoardDualEyeDisplay(*this, left_io, left_panel, right_io, right_panel);
+        display_->SetNetworkReady(false, false);
     }
 
     // ==================== 输入事件：触摸、电源键、KEY1 与 KEY2 ====================

@@ -285,6 +285,8 @@ void Application::Run() {
 
 void Application::HandleNetworkConnectedEvent() {
     ESP_LOGI(TAG, "Network connected");
+    network_connected_ = true;
+    UpdateNetworkDisplay();
     auto state = GetDeviceState();
 
     if (state == kDeviceStateStarting || state == kDeviceStateWifiConfiguring) {
@@ -311,6 +313,8 @@ void Application::HandleNetworkConnectedEvent() {
 }
 
 void Application::HandleNetworkDisconnectedEvent() {
+    network_connected_ = false;
+    UpdateNetworkDisplay();
     // Close current conversation when network disconnected
     auto state = GetDeviceState();
     if (state == kDeviceStateNotifying) {
@@ -325,6 +329,11 @@ void Application::HandleNetworkDisconnectedEvent() {
     // Update the status bar immediately to show the network state
     auto display = Board::GetInstance().GetDisplay();
     display->UpdateStatusBar(true);
+}
+
+void Application::UpdateNetworkDisplay() {
+    Board::GetInstance().GetDisplay()->SetNetworkReady(
+        network_connected_, activation_ready_ && !protocol_network_error_);
 }
 
 void Application::HandleActivationDoneEvent() {
@@ -359,10 +368,14 @@ void Application::ActivationTask() {
     CheckAssetsVersion();
 
     // Check for new firmware version
-    CheckNewVersion();
+    const bool activation_verified = CheckNewVersion();
 
-    // Initialize the protocol
-    InitializeProtocol();
+    // 保留现有激活流程，但仅在确认完成后报告显示就绪。
+    const bool protocol_started = InitializeProtocol();
+    Schedule([this, activation_verified, protocol_started]() {
+        activation_ready_ = activation_verified && protocol_started;
+        UpdateNetworkDisplay();
+    });
 
     // Signal completion to main loop
     xEventGroupSetBits(event_group_, MAIN_EVENT_ACTIVATION_DONE);
@@ -428,7 +441,7 @@ void Application::CheckAssetsVersion() {
     display->SetEmotion("robot_2");
 }
 
-void Application::CheckNewVersion() {
+bool Application::CheckNewVersion() {
     const int MAX_RETRY = 10;
     int retry_count = 0;
     int retry_delay = 10;  // Initial retry delay in seconds
@@ -443,7 +456,7 @@ void Application::CheckNewVersion() {
             retry_count++;
             if (retry_count >= MAX_RETRY) {
                 ESP_LOGE(TAG, "Too many retries, exit version check");
-                return;
+                return false;
             }
 
             char error_message[128];
@@ -481,7 +494,7 @@ void Application::CheckNewVersion() {
 
         if (ota_->HasNewVersion()) {
             if (UpgradeFirmware(ota_->GetFirmwareUrl(), ota_->GetFirmwareVersion())) {
-                return;  // This line will never be reached after reboot
+                return false;  // 重启后不会执行到此处。
             }
             // If upgrade failed, continue to normal operation
         }
@@ -489,8 +502,8 @@ void Application::CheckNewVersion() {
         // No new version, mark the current version as valid
         ota_->MarkCurrentVersionValid();
         if (!ota_->HasActivationCode() && !ota_->HasActivationChallenge()) {
-            // Exit the loop if done checking new version
-            break;
+            // 只有 OTA 成功响应且无待处理激活要求时，才确认显示就绪。
+            return true;
         }
 
         display->SetStatus(Lang::Strings::ACTIVATION);
@@ -517,7 +530,7 @@ void Application::CheckNewVersion() {
     }
 }
 
-void Application::InitializeProtocol() {
+bool Application::InitializeProtocol() {
     auto& board = Board::GetInstance();
     auto display = board.GetDisplay();
     auto codec = board.GetAudioCodec();
@@ -533,9 +546,26 @@ void Application::InitializeProtocol() {
         protocol_ = std::make_unique<MqttProtocol>();
     }
 
-    protocol_->OnConnected([this]() { DismissAlert(); });
+    protocol_->OnConnected([this]() {
+        Schedule([this]() {
+            protocol_network_error_ = false;
+            UpdateNetworkDisplay();
+        });
+        DismissAlert();
+    });
+
+    protocol_->OnDisconnected([this]() {
+        Schedule([this]() {
+            protocol_network_error_ = true;
+            UpdateNetworkDisplay();
+        });
+    });
 
     protocol_->OnNetworkError([this](const std::string& message) {
+        Schedule([this]() {
+            protocol_network_error_ = true;
+            UpdateNetworkDisplay();
+        });
         last_error_message_ = message;
         xEventGroupSetBits(event_group_, MAIN_EVENT_ERROR);
     });
@@ -547,6 +577,11 @@ void Application::InitializeProtocol() {
     });
 
     protocol_->OnAudioChannelOpened([this, codec, &board]() {
+        // WebSocket 按需连接，不会触发 Protocol::OnConnected。
+        Schedule([this]() {
+            protocol_network_error_ = false;
+            UpdateNetworkDisplay();
+        });
         board.SetPowerSaveLevel(PowerSaveLevel::PERFORMANCE);
         if (protocol_->server_sample_rate() != codec->output_sample_rate()) {
             ESP_LOGW(TAG,
@@ -707,7 +742,7 @@ void Application::InitializeProtocol() {
         }
     });
 
-    protocol_->Start();
+    return protocol_->Start();
 }
 
 void Application::ShowActivationCode(const std::string& code, const std::string& message) {
@@ -1346,6 +1381,10 @@ void Application::ResetProtocol() {
         if (protocol_ && protocol_->IsAudioChannelOpened()) {
             protocol_->CloseAudioChannel();
         }
+        // 独立于对话状态，清除显示就绪状态。
+        activation_ready_ = false;
+        protocol_network_error_ = false;
+        UpdateNetworkDisplay();
         // Reset protocol
         protocol_.reset();
     });

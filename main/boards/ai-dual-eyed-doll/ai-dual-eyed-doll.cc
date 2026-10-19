@@ -1,3 +1,4 @@
+// ==================== 依赖与板级配置 ====================
 #include "dual_network_board.h"
 
 #include <driver/gpio.h>
@@ -25,6 +26,7 @@
 #include "board_sounds.h"
 #include "button.h"
 #include "codecs/box_audio_codec.h"
+#include "settings.h"
 
 #include "config.h"
 #include "dual_eye_display.h"
@@ -37,6 +39,7 @@
 #error "AI dual-eyed doll requires USB Serial/JTAG primary console and no secondary console; GPIO43/44 are reserved for ML307C"
 #endif
 
+// ==================== 音频适配：采集通道与功放控制 ====================
 // 复用上游 SZPI 的驱动结构：一路人声麦克风和一路回声参考。
 class CustomAudioCodec : public BoxAudioCodec {
 public:
@@ -59,6 +62,7 @@ public:
     }
 };
 
+// ==================== 双眼屏幕：GC9D01N 初始化命令 ====================
 static const gc9d01_lcd_init_cmd_t kGc9d01InitCommands[] = {
     {0xFE, nullptr, 0, 0},
     {0xEF, nullptr, 0, 0},
@@ -116,16 +120,26 @@ static const gc9d01_lcd_init_cmd_t kGc9d01InitCommands[] = {
 
 class AiDualEyedDollBoard : public DualNetworkBoard {
 private:
+    // ---------- 外设对象与按键句柄 ----------
     i2c_master_bus_handle_t i2c_bus_ = nullptr;
     DualEyeDisplay* display_ = nullptr;
     PowerManager* battery_monitor_ = nullptr;
     std::unique_ptr<Button> key1_button_, key2_button_, pwr_button_, touch1_button_, touch2_button_;
+    // ---------- 显示、电源按键与关机状态 ----------
     bool screen_on_ = false;
     bool power_button_released_ = false;
     bool power_press_accepted_ = false;
     std::atomic<bool> shutting_down_{false};
     AudioCodec* codec_ = nullptr;
 
+    // ---------- 触摸保护：启动等待、稳定松开与再次触发许可 ----------
+    esp_timer_handle_t touch_guard_timer_ = nullptr;
+    int64_t touch_ready_after_ = 0;
+    uint8_t touch_release_ticks_[2] = {};
+    std::atomic<bool> touch_armed_[2] = {};
+
+
+    // ==================== 电源管理：安全上电与深度睡眠关机 ====================
     static void ConfigureOutput(gpio_num_t pin, int level) {
         // 先设置输出锁存值，再使能输出，避免产生有效电平脉冲。
         ESP_ERROR_CHECK(gpio_set_level(pin, level));
@@ -269,6 +283,7 @@ private:
         ESP_LOGI(TAG, "Screen power ready: backlight off, reset low, both CS high");
     }
 
+    // ---------- 屏幕显示与背光开关 ----------
     void SetScreenOn(bool on) {
         auto backlight = GetBacklight();
         if (on) {
@@ -290,6 +305,7 @@ private:
         }
     }
 
+    // ---------- 关机入口：停止音频、关闭背光并进入深度睡眠 ----------
     void Shutdown() {
         ESP_LOGI(TAG, "Power off: release KEY_ON to enter deep sleep");
         SetScreenOn(false);
@@ -305,28 +321,35 @@ private:
         ConfigureWakeAndPowerOff();
     }
 
-    void ToggleWifiConfig() {
+    // ==================== 网络操作：进入 WiFi 配网 ====================
+    void EnterBoardWifiConfig() {
         if (GetNetworkType() != NetworkType::WIFI) {
-            ESP_LOGI(TAG, "KEY_1 long press: WiFi provisioning unavailable in 4G mode");
+            // 先持久化配网请求，再切换网络，重启后进入 WiFi 配网。
+            {
+                Settings settings("doll", true);
+                settings.SetInt("wifi_config", 1);
+            }
+            SwitchNetworkType();
             return;
         }
         auto& wifi_board = static_cast<WifiBoard&>(GetCurrentBoard());
-        if (wifi_board.IsInWifiConfigMode()) {
-            ESP_LOGI(TAG, "KEY_1 long press: exit WiFi config and reboot");
-            Application::GetInstance().Reboot();
-            return;
+        if (!wifi_board.IsInWifiConfigMode()) {
+            wifi_board.EnterWifiConfigMode();
         }
-        ESP_LOGI(TAG, "KEY_1 long press: enter WiFi config");
-        wifi_board.EnterWifiConfigMode();
     }
 
+    // ==================== 触摸反馈：仅在待机且无播放时执行 ====================
     static void PlayTouchReaction(const char* emotion, const std::string_view& sound) {
         Application::GetInstance().Schedule([emotion, sound]() {
+            auto& app = Application::GetInstance();
+            // 对话和其他播放优先，排队后的触摸事件也必须重新检查。
+            if (app.GetDeviceState() != kDeviceStateIdle || !app.GetAudioService().IsPlaybackIdle()) return;
             Board::GetInstance().GetDisplay()->SetEmotion(emotion);
             Application::GetInstance().PlaySound(sound);
         });
     }
 
+    // ==================== 外设总线：共享 I2C 与 TCA9554 扩展器 ====================
     void InitializeI2c() {
         i2c_master_bus_config_t i2c_bus_cfg = {
             .i2c_port = AUDIO_CODEC_I2C_PORT,
@@ -363,6 +386,7 @@ private:
         ESP_LOGI(TAG, "TCA9554 0x20: all ports input (IMU/SD not populated)");
     }
 
+    // ==================== 双眼显示：SPI、共享复位与面板创建 ====================
     void InitializeSpi() {
         spi_bus_config_t buscfg = {};
         buscfg.sclk_io_num = DISPLAY_SPI_SCLK_GPIO;
@@ -428,28 +452,54 @@ private:
         display_ = new DualEyeDisplay(left_io, left_panel, right_io, right_panel);
     }
 
+    // ==================== 输入事件：触摸、电源键、KEY1 与 KEY2 ====================
     void InitializeButtons() {
         key1_button_ = std::make_unique<Button>(KEY_1_GPIO, false, 2000);
         key2_button_ = std::make_unique<Button>(KEY_2_GPIO, false, 2000);
         pwr_button_ = std::make_unique<Button>(PWR_BUTTON_GPIO, POWER_BUTTON_ACTIVE_LEVEL == 1, POWER_BUTTON_HOLD_MS);
         // Button 默认启用内部上下拉；本板使用外部 R53。
         ESP_ERROR_CHECK(gpio_set_pull_mode(PWR_BUTTON_GPIO, GPIO_FLOATING));
+        // ---------- 触摸：启动防误触与对话期间屏蔽 ----------
         touch1_button_ = std::make_unique<Button>(TOUCH_1_GPIO, TOUCH_ACTIVE_HIGH);
         touch2_button_ = std::make_unique<Button>(TOUCH_2_GPIO, TOUCH_ACTIVE_HIGH);
-        // 实装 TOG 接地：松开时不得再次触发响应。
+        // 上电稳定 2 秒后，连续松开 300 毫秒才允许下一次触摸，不阻塞音频任务。
+        touch_ready_after_ = esp_timer_get_time() + 2000000;
         touch1_button_->OnPressDown([this]() {
-            if (!shutting_down_) PlayTouchReaction("happy", BoardSounds::OGG_SHORT_LAUGH);
+            if (!touch_armed_[0].exchange(false) || shutting_down_) return;
+            if (Application::GetInstance().GetDeviceState() == kDeviceStateIdle)
+                PlayTouchReaction("happy", BoardSounds::OGG_SHORT_LAUGH);
         });
         touch2_button_->OnPressDown([this]() {
-            if (!shutting_down_) PlayTouchReaction("angry", BoardSounds::OGG_TSUNDERE);
+            if (!touch_armed_[1].exchange(false) || shutting_down_) return;
+            if (Application::GetInstance().GetDeviceState() == kDeviceStateIdle)
+                PlayTouchReaction("angry", BoardSounds::OGG_TSUNDERE);
         });
+        esp_timer_create_args_t touch_timer_args = {};
+        touch_timer_args.callback = [](void* arg) {
+            auto* board = static_cast<AiDualEyedDollBoard*>(arg);
+            if (board->shutting_down_ || esp_timer_get_time() < board->touch_ready_after_) return;
+            const gpio_num_t pins[] = {TOUCH_1_GPIO, TOUCH_2_GPIO};
+            for (int i = 0; i < 2; ++i) {
+                if (gpio_get_level(pins[i]) == (TOUCH_ACTIVE_HIGH ? 0 : 1)) {
+                    if (board->touch_release_ticks_[i] < 6) ++board->touch_release_ticks_[i];
+                    if (board->touch_release_ticks_[i] == 6) board->touch_armed_[i] = true;
+                } else {
+                    board->touch_release_ticks_[i] = 0;
+                }
+            }
+        };
+        touch_timer_args.arg = this;
+        touch_timer_args.name = "touch_guard";
+        ESP_ERROR_CHECK(esp_timer_create(&touch_timer_args, &touch_guard_timer_));
+        ESP_ERROR_CHECK(esp_timer_start_periodic(touch_guard_timer_, 50000));
+        // ---------- 电源键：短按切换对话，长按 3 秒关机 ----------
         power_button_released_ = gpio_get_level(PWR_BUTTON_GPIO) != POWER_BUTTON_ACTIVE_LEVEL;
         pwr_button_->OnPressDown([this]() { power_press_accepted_ = power_button_released_; });
         pwr_button_->OnPressUp([this]() { power_button_released_ = true; });
         pwr_button_->OnClick([this]() {
             if (!power_press_accepted_ || shutting_down_) return;
             Application::GetInstance().Schedule([this]() {
-                if (!shutting_down_) SetScreenOn(!screen_on_);
+                if (!shutting_down_) Application::GetInstance().ToggleChatState();
             });
         });
         pwr_button_->OnLongPress([this]() {
@@ -457,14 +507,16 @@ private:
             if (!power_press_accepted_ || shutting_down_.exchange(true)) return;
             Application::GetInstance().Schedule([this]() { Shutdown(); });
         });
+        // ---------- KEY1：单击切换网络，三击进入 WiFi 配网 ----------
         key1_button_->OnClick([this]() {
             Application::GetInstance().Schedule([this]() {
-                if (!shutting_down_) Application::GetInstance().ToggleChatState();
+                if (!shutting_down_) SwitchNetworkType();
             });
         });
-        key1_button_->OnLongPress([this]() {
-            Application::GetInstance().Schedule([this]() { if (!shutting_down_) ToggleWifiConfig(); });
-        });
+        key1_button_->OnMultipleClick([this]() {
+            Application::GetInstance().Schedule([this]() { if (!shutting_down_) EnterBoardWifiConfig(); });
+        }, 3);
+        // ---------- KEY2：单击手动切换表情 ----------
         key2_button_->OnClick([this]() {
             if (shutting_down_) return;
             Application::GetInstance().Schedule([this]() {
@@ -473,17 +525,13 @@ private:
                 display_->ShowNextAnimation();
             });
         });
-        key2_button_->OnLongPress([this]() {
-            if (shutting_down_) return;
-            Application::GetInstance().Schedule([this]() {
-                if (!shutting_down_) SwitchNetworkType();
-            });
-        });
     }
 
+    // ==================== 电池监测 ====================
     void InitializeBattery() { battery_monitor_ = new PowerManager(); }
 
 public:
+    // ==================== 板卡启动：按电源、总线、显示、输入的顺序初始化 ====================
     AiDualEyedDollBoard() : DualNetworkBoard(ML307_TX_PIN, ML307_RX_PIN, ML307_DTR_PIN) {
         InitializePowerOff();
         if (!QualifyPowerOn()) ConfigureWakeAndPowerOff();
@@ -497,6 +545,7 @@ public:
         SetScreenOn(true);
     }
 
+    // ==================== 框架接口：音频、显示、网络启动、背光与电池状态 ====================
     virtual AudioCodec* GetAudioCodec() override {
         static CustomAudioCodec audio_codec(i2c_bus_);
         codec_ = &audio_codec;
@@ -504,6 +553,23 @@ public:
     }
 
     virtual Display* GetDisplay() override { return display_; }
+
+    void StartNetwork() override {
+        bool enter_config = false;
+        {
+            Settings settings("doll", true);
+            enter_config = settings.GetInt("wifi_config", 0) != 0;
+            settings.SetInt("wifi_config", 0);
+        }
+        DualNetworkBoard::StartNetwork();
+        if (enter_config && GetNetworkType() == NetworkType::WIFI) {
+            // 此时 WiFi 管理器已初始化；已有配网热点时无需重复进入。
+            auto& wifi_board = static_cast<WifiBoard&>(GetCurrentBoard());
+            if (!wifi_board.IsInWifiConfigMode()) {
+                wifi_board.EnterWifiConfigMode();
+            }
+        }
+    }
 
     virtual Backlight* GetBacklight() override {
         static PwmBacklight backlight(DISPLAY_BACKLIGHT_PIN, DISPLAY_BACKLIGHT_OUTPUT_INVERT);

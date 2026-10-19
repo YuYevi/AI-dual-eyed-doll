@@ -4,7 +4,7 @@
 
 ## 硬件概览
 
-- 主控：ESP32-S3，16 MB Flash，8 MB Octal PSRAM。
+- 主控：ESP32-S3，32 MB Flash，8 MB Octal PSRAM。
 - 显示：两块 160 x 160 GC9D01N 圆形 LCD，共用 SPI 总线，独立片选。
 - 音频：ES8311 播放 Codec、ES7210 采集 Codec、MIC1 人声麦克风、MIC3 回声参考。
 - 输入：两个 TTP233H 触摸按键、KEY_1、KEY_2 和电源键。
@@ -78,9 +78,9 @@ python scripts/build.py ai-dual-eyed-doll
 idf.py -p COM9 flash
 ```
 
-具体串口号按实际设备修改。动画资源位于 `0x800000` 的 `assets` 分区，更新动画后必须重新烧录资源分区；只烧录应用不会更新动画。
+具体串口号按实际设备修改。板级配置使用小智 `partitions/v2/32m.csv`：`ota_0`、`ota_1` 各为 4 MB，`assets` 分区从 `0xA00000` 开始、大小为 16 MB。双眼动画资源会作为自定义资源包 `dual_eye_assets.pack` 写入该分区；更新动画后必须重新烧录资源分区，只烧录应用不会更新动画。
 
-若日志出现 `dual_eye.anim is missing from the assets partition`，说明资源分区未更新，需要执行完整烧录。
+从旧 16 MB Flash 更换为 32 MB Flash 后，首次烧录必须执行完整 `idf.py flash`，以同步更新启动配置、分区表、应用和 `assets` 分区。若日志出现 `dual_eye.anim is missing from the assets partition`，说明资源分区未更新，需要执行完整烧录。
 
 ## 验证状态
 

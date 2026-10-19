@@ -5,8 +5,8 @@
         {
             "name": "ai-dual-eyed-doll",
             "sdkconfig_append": [
-                "CONFIG_PARTITION_TABLE_CUSTOM_FILENAME=\"partitions/v2/16m.csv\"",
-                "CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y",
+                "CONFIG_PARTITION_TABLE_CUSTOM_FILENAME=\"partitions/v2/32m.csv\"",
+                "CONFIG_ESPTOOLPY_FLASHSIZE_32MB=y",
                 "CONFIG_FLASH_NONE_ASSETS=n",
                 "CONFIG_FLASH_CUSTOM_ASSETS=y",
                 "CONFIG_CUSTOM_ASSETS_FILE=\"boards/ai-dual-eyed-doll/assets/dual_eye_assets.pack\"",

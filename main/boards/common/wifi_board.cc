@@ -54,7 +54,7 @@ void WifiBoard::StartNetwork() {
 
     // Initialize WiFi manager
     WifiManagerConfig config;
-    config.ssid_prefix = "Xiaozhi";
+    config.ssid_prefix = "米爆娃";
     config.language = Lang::CODE;
     config.show_ota_config = true;
     config.show_sleep_config = true;
@@ -188,7 +188,16 @@ void WifiBoard::StartWifiConfigMode() {
 #elif CONFIG_USE_ESP_BLUFI_WIFI_PROVISIONING
     auto &blufi = Blufi::GetInstance();
     // initialize esp-blufi protocol
-    blufi.init();
+    esp_err_t ret = blufi.init();
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to initialize BluFi provisioning: %s", esp_err_to_name(ret));
+        return;
+    }
+
+    Application::GetInstance().Schedule([]() {
+        Application::GetInstance().Alert(Lang::Strings::WIFI_CONFIG_MODE,
+            Lang::Strings::ENTERING_WIFI_CONFIG_MODE, "gear", Lang::Sounds::OGG_WIFICONFIG);
+    });
 #endif
 }
 

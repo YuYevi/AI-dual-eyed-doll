@@ -275,7 +275,7 @@ void Application::Run() {
 
             // Print debug info every 10 seconds
             if (clock_ticks_ % 10 == 0) {
-                // SystemInfo::PrintHeapStats();
+                SystemInfo::PrintHeapStats();
                 // SystemInfo::PrintTaskList();
                 // SystemInfo::PrintTaskCpuUsage(pdMS_TO_TICKS(1000));
             }

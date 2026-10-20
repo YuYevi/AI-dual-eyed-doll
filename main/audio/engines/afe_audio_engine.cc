@@ -162,7 +162,7 @@ bool AfeAudioEngine::Initialize(AudioCodec* codec, int frame_duration_ms, srmode
     afe_config->wakenet_model_name = wake_detector_ == WakeDetector::kWakeNet
         ? wakenet_model_name
         : nullptr;
-    afe_config->agc_init = false;
+    afe_config->agc_init = true;
     afe_config->memory_alloc_mode = AFE_MEMORY_ALLOC_MORE_PSRAM;
 
     afe_iface_ = esp_afe_handle_from_config(afe_config);

@@ -48,7 +48,7 @@ public:
                         AUDIO_I2S_GPIO_MCLK, AUDIO_I2S_GPIO_BCLK, AUDIO_I2S_GPIO_WS,
                         AUDIO_I2S_GPIO_DOUT, AUDIO_I2S_GPIO_DIN, GPIO_NUM_NC,
                         AUDIO_CODEC_ES8311_ADDR, AUDIO_CODEC_ES7210_ADDR, AUDIO_INPUT_REFERENCE,
-                        28.0f,  // 物理 MIC1 的增益
+                        34.0f,  // 物理 MIC1 的增益
                         2,      // 物理 MIC3 作为播放回声参考输入
                         0.0f) {}
 
@@ -519,6 +519,18 @@ private:
                 if (!shutting_down_) Application::GetInstance().ToggleChatState();
             });
         });
+        pwr_button_->OnDoubleClick([this]() {
+            if (!power_press_accepted_ || shutting_down_) return;
+            Application::GetInstance().Schedule([this]() {
+                if (!shutting_down_) SwitchNetworkType();
+            });
+        });
+        pwr_button_->OnMultipleClick([this]() {
+            if (!power_press_accepted_ || shutting_down_) return;
+            Application::GetInstance().Schedule([this]() {
+                if (!shutting_down_) EnterBoardWifiConfig();
+            });
+        }, 3);
         pwr_button_->OnLongPress([this]() {
             // 忽略开机时的首次持续按压，直到松开并重新按下。
             if (!power_press_accepted_ || shutting_down_.exchange(true)) return;

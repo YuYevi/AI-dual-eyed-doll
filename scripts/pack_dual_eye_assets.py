@@ -11,7 +11,7 @@ import zlib
 from fractions import Fraction
 from pathlib import Path
 
-WIDTH = HEIGHT = 160
+WIDTH = HEIGHT = 128
 FPS = 25
 FRAME_BYTES = WIDTH * HEIGHT * 2
 ASSETS_CAPACITY = 16 * 1024 * 1024
@@ -47,7 +47,7 @@ def gif_metadata(path: Path) -> list[int]:
     if data[:6] not in (b"GIF87a", b"GIF89a"):
         raise ValueError(f"{path}: invalid GIF signature")
     width, height, flags = struct.unpack_from("<HHB", data, 6)
-    if (width, height) != (WIDTH, HEIGHT):
+    if (width, height) != (160, 160):
         raise ValueError(f"{path}: canvas must be 160x160")
     cursor = 13 + (3 * (2 ** ((flags & 7) + 1)) if flags & 128 else 0)
     delays, loops = [], []
@@ -89,7 +89,7 @@ def gif_metadata(path: Path) -> list[int]:
                 loops.append(struct.unpack_from("<H", chunks[1], 1)[0])
         elif marker == 0x2C:
             x, y, w, h, flags = struct.unpack_from("<HHHHB", data, cursor)
-            if (x, y, w, h) != (0, 0, WIDTH, HEIGHT):
+            if (x, y, w, h) != (0, 0, 160, 160):
                 raise ValueError(f"{path}: every stored frame must be full 160x160")
             cursor += 9 + (3 * (2 ** ((flags & 7) + 1)) if flags & 128 else 0)
             cursor += 1  # LZW 最小代码大小
@@ -116,7 +116,7 @@ def probe(path: Path, expected_frames: int) -> tuple:
     for index, frame in enumerate(frames):
         pts = Fraction(frame["pts"]) * time_base
         duration = Fraction(frame.get("duration", frame.get("pkt_duration", -1))) * time_base
-        if (frame["width"], frame["height"]) != (WIDTH, HEIGHT):
+        if (frame["width"], frame["height"]) != (160, 160):
             raise ValueError(f"{path}: frame {index} must be 160x160")
         if pts != Fraction(index, FPS) or duration != Fraction(1, FPS):
             raise ValueError(f"{path}: frame {index} must have contiguous 40ms timing")
@@ -129,7 +129,7 @@ def probe(path: Path, expected_frames: int) -> tuple:
 def decode(path: Path, expected_frames: int) -> list[bytes]:
     raw = subprocess.check_output([
         "ffmpeg", "-v", "error", "-ignore_loop", "1", "-min_delay", "0", "-i", str(path),
-        "-map", "0:v:0", "-fps_mode", "passthrough", "-f", "rawvideo", "-pix_fmt", "rgb24", "-",
+        "-map", "0:v:0", "-vf", f"scale={WIDTH}:{HEIGHT}:flags=lanczos", "-fps_mode", "passthrough", "-f", "rawvideo", "-pix_fmt", "rgb24", "-",
     ])
     rgb_size = WIDTH * HEIGHT * 3
     if len(raw) != rgb_size * expected_frames:
@@ -300,7 +300,9 @@ def main() -> None:
     args = parser.parse_args()
     base_path = args.base_package or (args.package_output if args.package_output and args.package_output.exists() else None)
     base_files = unpack_assets(base_path.read_bytes()) if base_path else None
-    animation = build_animation(args.input, base_files["dual_eye.anim"] if base_files is not None else None)
+    # The existing dual_eye.anim may use the previous 160x160 frame format.
+    # Rebuild it at the target panel resolution while preserving other assets.
+    animation = build_animation(args.input)
     package = None
     if args.package_output:
         package = package_assets(animation, args.srmodels.read_bytes() if args.srmodels else None, base_files=base_files)

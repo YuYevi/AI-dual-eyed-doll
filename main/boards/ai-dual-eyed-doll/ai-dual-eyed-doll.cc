@@ -466,7 +466,9 @@ private:
         pwr_button_->OnClick([this]() {
             if (!power_press_accepted_ || shutting_down_) return;
             Application::GetInstance().Schedule([this]() {
-                if (!shutting_down_) Application::GetInstance().ToggleChatState();
+                if (shutting_down_ || display_ == nullptr) return;
+                ESP_LOGI(TAG, "Power button click: next animation");
+                display_->ShowNextAnimation();
             });
         });
         pwr_button_->OnLongPress([this]() {

@@ -106,6 +106,9 @@ private:
     int64_t touch_ready_after_ = 0;
     uint8_t touch_release_ticks_[2] = {};
     std::atomic<bool> touch_armed_[2] = {};
+    // Separate indexes preserve each input's required expression sequence.
+    uint8_t touch1_emotion_index_ = 0;
+    uint8_t power_emotion_index_ = 0;
 
 
     // ==================== 电源管理：安全上电与深度睡眠关机 ====================
@@ -319,6 +322,26 @@ private:
     }
 
     // ==================== 外设总线：共享 I2C 与 TCA9554 扩展器 ====================
+    void CycleTouch1Emotion() {
+        static constexpr const char* kTouch1Emotions[] = {"sad", "angry", "scared"};
+        const char* emotion = kTouch1Emotions[touch1_emotion_index_];
+        touch1_emotion_index_ = (touch1_emotion_index_ + 1) %
+                               (sizeof(kTouch1Emotions) / sizeof(kTouch1Emotions[0]));
+        ESP_LOGI(TAG, "Touch 1: %s", emotion);
+        display_->SetEmotion(emotion);
+    }
+
+    void CyclePowerButtonEmotion() {
+        static constexpr const char* kPowerButtonEmotions[] = {
+            "calm", "happy", "surprised", "sleepy", "scared", "shy",
+        };
+        const char* emotion = kPowerButtonEmotions[power_emotion_index_];
+        power_emotion_index_ = (power_emotion_index_ + 1) %
+                              (sizeof(kPowerButtonEmotions) / sizeof(kPowerButtonEmotions[0]));
+        ESP_LOGI(TAG, "Power button click: %s", emotion);
+        display_->SetEmotion(emotion);
+    }
+
     void InitializeI2c() {
         i2c_master_bus_config_t i2c_bus_cfg = {
             .i2c_port = AUDIO_CODEC_I2C_PORT,
@@ -433,8 +456,10 @@ private:
         touch_ready_after_ = esp_timer_get_time() + 2000000;
         touch1_button_->OnPressDown([this]() {
             if (!touch_armed_[0].exchange(false) || shutting_down_) return;
-            if (Application::GetInstance().GetDeviceState() == kDeviceStateIdle)
-                PlayTouchReaction("happy", BoardSounds::OGG_SHORT_LAUGH);
+            Application::GetInstance().Schedule([this]() {
+                if (shutting_down_ || display_ == nullptr) return;
+                CycleTouch1Emotion();
+            });
         });
         touch2_button_->OnPressDown([this]() {
             if (!touch_armed_[1].exchange(false) || shutting_down_) return;
@@ -467,8 +492,7 @@ private:
             if (!power_press_accepted_ || shutting_down_) return;
             Application::GetInstance().Schedule([this]() {
                 if (shutting_down_ || display_ == nullptr) return;
-                ESP_LOGI(TAG, "Power button click: next animation");
-                display_->ShowNextAnimation();
+                CyclePowerButtonEmotion();
             });
         });
         pwr_button_->OnLongPress([this]() {

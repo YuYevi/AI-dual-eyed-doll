@@ -30,7 +30,7 @@
 
 #include "config.h"
 #include "dual_eye_display.h"
-#include "esp_lcd_gc9d01.h"
+#include "esp_lcd_panel_vendor.h"
 
 #define TAG "AiDualEyedDoll"
 
@@ -63,59 +63,28 @@ public:
 };
 
 // ==================== 双眼屏幕：GC9D01N 初始化命令 ====================
-static const gc9d01_lcd_init_cmd_t kGc9d01InitCommands[] = {
-    {0xFE, nullptr, 0, 0},
-    {0xEF, nullptr, 0, 0},
-    {0x80, (const uint8_t[]){0xFF}, 1, 0},
-    {0x81, (const uint8_t[]){0xFF}, 1, 0},
-    {0x82, (const uint8_t[]){0xFF}, 1, 0},
-    {0x83, (const uint8_t[]){0xFF}, 1, 0},
-    {0x84, (const uint8_t[]){0xFF}, 1, 0},
-    {0x85, (const uint8_t[]){0xFF}, 1, 0},
-    {0x86, (const uint8_t[]){0xFF}, 1, 0},
-    {0x87, (const uint8_t[]){0xFF}, 1, 0},
-    {0x88, (const uint8_t[]){0xFF}, 1, 0},
-    {0x89, (const uint8_t[]){0xFF}, 1, 0},
-    {0x8A, (const uint8_t[]){0xFF}, 1, 0},
-    {0x8B, (const uint8_t[]){0xFF}, 1, 0},
-    {0x8C, (const uint8_t[]){0xFF}, 1, 0},
-    {0x8D, (const uint8_t[]){0xFF}, 1, 0},
-    {0x8E, (const uint8_t[]){0xFF}, 1, 0},
-    {0x8F, (const uint8_t[]){0xFF}, 1, 0},
-    {0x3A, (const uint8_t[]){0x05}, 1, 0},
-    {0xEC, (const uint8_t[]){0x01}, 1, 0},
-    {0x74, (const uint8_t[]){0x02, 0x0E, 0x00, 0x00, 0x00, 0x00, 0x00}, 7, 0},
-    {0x98, (const uint8_t[]){0x3E}, 1, 0},
-    {0x99, (const uint8_t[]){0x3E}, 1, 0},
-    {0xB5, (const uint8_t[]){0x0D, 0x0D}, 2, 0},
-    {0x60, (const uint8_t[]){0x38, 0x0F, 0x79, 0x67}, 4, 0},
-    {0x61, (const uint8_t[]){0x38, 0x11, 0x79, 0x67}, 4, 0},
-    {0x64, (const uint8_t[]){0x38, 0x17, 0x71, 0x5F, 0x79, 0x67}, 6, 0},
-    {0x65, (const uint8_t[]){0x38, 0x13, 0x71, 0x5B, 0x79, 0x67}, 6, 0},
-    {0x6A, (const uint8_t[]){0x00, 0x00}, 2, 0},
-    {0x6C, (const uint8_t[]){0x22, 0x02, 0x22, 0x02, 0x22, 0x22, 0x50}, 7, 0},
-    {0x6E, (const uint8_t[]){0x03, 0x03, 0x01, 0x01, 0x00, 0x00, 0x0F, 0x0F, 0x0D, 0x0D, 0x0B,
-                             0x0B, 0x09, 0x09, 0x00, 0x00, 0x00, 0x00, 0x0A, 0x0A, 0x0C, 0x0C,
-                             0x0E, 0x0E, 0x10, 0x10, 0x00, 0x00, 0x02, 0x02, 0x04, 0x04}, 32, 0},
-    {0xBF, (const uint8_t[]){0x01}, 1, 0},
-    {0xF9, (const uint8_t[]){0x40}, 1, 0},
-    {0x9B, (const uint8_t[]){0x3B}, 1, 0},
-    {0x93, (const uint8_t[]){0x33, 0x7F, 0x00}, 3, 0},
-    {0x7E, (const uint8_t[]){0x30}, 1, 0},
-    {0x70, (const uint8_t[]){0x0D, 0x02, 0x08, 0x0D, 0x02, 0x08}, 6, 0},
-    {0x71, (const uint8_t[]){0x0D, 0x02, 0x08}, 3, 0},
-    {0x91, (const uint8_t[]){0x0E, 0x09}, 2, 0},
-    {0xC3, (const uint8_t[]){0x18}, 1, 0},
-    {0xC4, (const uint8_t[]){0x18}, 1, 0},
-    {0xC9, (const uint8_t[]){0x3C}, 1, 0},
-    {0xF0, (const uint8_t[]){0x13, 0x15, 0x04, 0x05, 0x01, 0x38}, 6, 0},
-    {0xF2, (const uint8_t[]){0x13, 0x15, 0x04, 0x05, 0x01, 0x34}, 6, 0},
-    {0xF1, (const uint8_t[]){0x4B, 0xB8, 0x7B, 0x34, 0x35, 0xEF}, 6, 0},
-    {0xF3, (const uint8_t[]){0x47, 0xB4, 0x72, 0x34, 0x35, 0xDA}, 6, 0},
-    {0x36, (const uint8_t[]){0x00}, 1, 0},
-    {0x11, nullptr, 0, 200},
-    // 在双眼均写入完整首帧前，保持屏幕扫描关闭。
-    {0x28, nullptr, 0, 0},
+// BOE 0.9-inch ST7735S power, frame-rate, VCOM, and gamma settings.
+// ST7789 handles SLPOUT, MADCTL, and COLMOD; keep display off until both
+// controllers have received their first complete frames.
+struct PanelInitCmd {
+    uint8_t cmd;
+    const uint8_t* data;
+    size_t data_bytes;
+};
+
+static const PanelInitCmd kBoePanelInit[] = {
+    {0xB1, (const uint8_t[]){0x02, 0x35, 0x36}, 3},
+    {0xB2, (const uint8_t[]){0x02, 0x35, 0x36}, 3},
+    {0xB3, (const uint8_t[]){0x02, 0x35, 0x36, 0x02, 0x35, 0x36}, 6},
+    {0xB4, (const uint8_t[]){0x00}, 1},
+    {0xC0, (const uint8_t[]){0xA2, 0x02, 0x84}, 3},
+    {0xC1, (const uint8_t[]){0xC5}, 1},
+    {0xC2, (const uint8_t[]){0x0D, 0x00}, 2},
+    {0xC3, (const uint8_t[]){0x8A, 0x2A}, 2},
+    {0xC4, (const uint8_t[]){0x8D, 0xEE}, 2},
+    {0xC5, (const uint8_t[]){0x02}, 1},
+    {0xE0, (const uint8_t[]){0x12, 0x1C, 0x10, 0x18, 0x33, 0x2C, 0x25, 0x28, 0x28, 0x27, 0x2F, 0x3C, 0x00, 0x03, 0x03, 0x10}, 16},
+    {0xE1, (const uint8_t[]){0x12, 0x1C, 0x10, 0x18, 0x2D, 0x28, 0x23, 0x28, 0x28, 0x26, 0x2F, 0x3B, 0x00, 0x03, 0x03, 0x10}, 16},
 };
 
 class AiDualEyedDollBoard : public DualNetworkBoard {
@@ -406,7 +375,7 @@ private:
         vTaskDelay(pdMS_TO_TICKS(120));
     }
 
-    void CreateEyePanel(gpio_num_t cs_pin, bool mirror_x, esp_lcd_panel_io_handle_t* io_out,
+    void CreateEyePanel(gpio_num_t cs_pin, esp_lcd_panel_io_handle_t* io_out,
                         esp_lcd_panel_handle_t* panel_out) {
         esp_lcd_panel_io_spi_config_t io_config = {};
         io_config.cs_gpio_num = cs_pin;
@@ -418,37 +387,35 @@ private:
         io_config.lcd_param_bits = 8;
         ESP_ERROR_CHECK(esp_lcd_new_panel_io_spi(DISPLAY_SPI_HOST, &io_config, io_out));
 
-        gc9d01_vendor_config_t vendor_config = {
-            .init_cmds = kGc9d01InitCommands,
-            .init_cmds_size = static_cast<uint16_t>(sizeof(kGc9d01InitCommands) /
-                                                    sizeof(kGc9d01InitCommands[0])),
-        };
         esp_lcd_panel_dev_config_t panel_config = {};
         panel_config.reset_gpio_num = GPIO_NUM_NC;
-        panel_config.rgb_ele_order = LCD_RGB_ELEMENT_ORDER_RGB;
-        panel_config.bits_per_pixel = 16;
-        panel_config.vendor_config = &vendor_config;
-        ESP_ERROR_CHECK(esp_lcd_new_panel_gc9d01(*io_out, &panel_config, panel_out));
-        // ResetEyes 已同时复位两个控制器。驱动在此处
-        // 不得再次操作共用复位线，也不得再次发送软件复位命令。
-        ESP_ERROR_CHECK(esp_lcd_panel_disp_on_off(*panel_out, false));
+        panel_config.rgb_ele_order = LCD_RGB_ELEMENT_ORDER_BGR;
+        panel_config.bits_per_pixel = DISPLAY_BITS_PER_PIXEL;
+        ESP_ERROR_CHECK(esp_lcd_new_panel_st7789(*io_out, &panel_config, panel_out));
+        // ResetEyes already reset both controllers; never reset one while
+        // the other is initialized on the shared reset line.
         ESP_ERROR_CHECK(esp_lcd_panel_init(*panel_out));
+        ESP_ERROR_CHECK(esp_lcd_panel_disp_on_off(*panel_out, false));
+        for (const auto& item : kBoePanelInit) {
+            ESP_ERROR_CHECK(esp_lcd_panel_io_tx_param(*io_out, item.cmd, item.data, item.data_bytes));
+        }
+        ESP_ERROR_CHECK(esp_lcd_panel_set_gap(*panel_out, DISPLAY_OFFSET_X, DISPLAY_OFFSET_Y));
         ESP_ERROR_CHECK(esp_lcd_panel_invert_color(*panel_out, DISPLAY_INVERT_COLOR));
-        ESP_ERROR_CHECK(esp_lcd_panel_mirror(*panel_out, mirror_x, DISPLAY_MIRROR_Y));
+        ESP_ERROR_CHECK(esp_lcd_panel_mirror(*panel_out, DISPLAY_MIRROR_X, DISPLAY_MIRROR_Y));
         ESP_ERROR_CHECK(esp_lcd_panel_disp_on_off(*panel_out, false));
         ESP_LOGI(TAG, "Eye CS%d initialized with display off", static_cast<int>(cs_pin));
     }
 
     void InitializeEyes() {
-        ESP_LOGI(TAG, "Init dual GC9D01N eyes");
+        ESP_LOGI(TAG, "Init dual BOE ST7735S 128x128 eyes");
         ResetEyes();
 
         esp_lcd_panel_io_handle_t left_io = nullptr;
         esp_lcd_panel_io_handle_t right_io = nullptr;
         esp_lcd_panel_handle_t left_panel = nullptr;
         esp_lcd_panel_handle_t right_panel = nullptr;
-        CreateEyePanel(DISPLAY_1_SPI_CS_GPIO, false, &left_io, &left_panel);
-        CreateEyePanel(DISPLAY_2_SPI_CS_GPIO, false, &right_io, &right_panel);
+        CreateEyePanel(DISPLAY_1_SPI_CS_GPIO, &left_io, &left_panel);
+        CreateEyePanel(DISPLAY_2_SPI_CS_GPIO, &right_io, &right_panel);
         display_ = new DualEyeDisplay(left_io, left_panel, right_io, right_panel);
     }
 

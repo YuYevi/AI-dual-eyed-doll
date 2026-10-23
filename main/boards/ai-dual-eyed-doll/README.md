@@ -5,7 +5,7 @@
 ## 硬件概览
 
 - 主控：ESP32-S3，16 MB Flash，8 MB Octal PSRAM。
-- 0.9-inch BOE ST7735S display: dual 128x128 LCDs, ST7789-compatible driver, BGR order, inversion, (2, 2) GRAM offset, and dual-axis mirroring.
+- 显示：两块 160 × 160 GC9D01N 圆形 LCD，共用 SPI 总线，独立片选。
 - 音频：ES8311 播放 Codec、ES7210 采集 Codec、MIC1 人声麦克风、MIC3 回声参考。
 - 输入：两个 TTP233H 触摸按键、KEY_1、KEY_2 和电源键。
 - 网络：支持 Wi-Fi 与 ML307C 4G，通过 KEY_1 单击切换。

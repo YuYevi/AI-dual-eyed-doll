@@ -5,7 +5,7 @@ from __future__ import annotations
 import argparse, hashlib, json, struct, subprocess, zlib
 from pathlib import Path
 
-WIDTH = HEIGHT = 128
+WIDTH = HEIGHT = 160
 FPS = 25
 MAGIC = b"DEYEANIM"
 VERSION = 1

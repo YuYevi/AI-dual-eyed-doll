@@ -62,14 +62,14 @@
 #define TOUCH_ACTIVE_HIGH true // AHLB 接地；实装 TOG 接地（非自锁模式）
 
 // 显示尺寸、方向与像素格式
-#define DISPLAY_WIDTH 128
-#define DISPLAY_HEIGHT 128
-#define DISPLAY_MIRROR_X true
-#define DISPLAY_MIRROR_Y true
+#define DISPLAY_WIDTH 160
+#define DISPLAY_HEIGHT 160
+#define DISPLAY_MIRROR_X false
+#define DISPLAY_MIRROR_Y false
 #define DISPLAY_SWAP_XY false
-#define DISPLAY_OFFSET_X 2
-#define DISPLAY_OFFSET_Y 2
-#define DISPLAY_INVERT_COLOR true
+#define DISPLAY_OFFSET_X 0
+#define DISPLAY_OFFSET_Y 0
+#define DISPLAY_INVERT_COLOR false
 #define DISPLAY_BITS_PER_PIXEL 16
 
 // 显示 SPI 总线与双屏控制引脚

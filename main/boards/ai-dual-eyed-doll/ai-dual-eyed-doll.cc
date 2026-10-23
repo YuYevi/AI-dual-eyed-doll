@@ -100,6 +100,7 @@ private:
     bool power_press_accepted_ = false;
     std::atomic<bool> shutting_down_{false};
     AudioCodec* codec_ = nullptr;
+    TaskHandle_t expression_cycle_task_ = nullptr;
 
     // ---------- 触摸保护：启动等待、稳定松开与再次触发许可 ----------
     esp_timer_handle_t touch_guard_timer_ = nullptr;
@@ -110,6 +111,43 @@ private:
     uint8_t touch1_emotion_index_ = 0;
     uint8_t power_emotion_index_ = 0;
 
+
+    // ==================== 开机表情循环：乖巧、开心、眩晕、哭泣 ====================
+    static void ExpressionCycleTaskEntry(void* arg) {
+        static_cast<AiDualEyedDollBoard*>(arg)->ExpressionCycleTask();
+    }
+
+    void ExpressionCycleTask() {
+        // 资源包实际包含 calm、happy、scared、sad；MapEmotion 将 dizzy/crying
+        // 分别映射到 scared/sad，使循环语义保持为“眩晕、哭泣”。
+        static constexpr struct {
+            const char* emotion;
+            uint32_t duration_ms;
+        } kStartupExpressions[] = {
+            {"calm", 5000}, {"happy", 3000}, {"dizzy", 3000}, {"crying", 3000},
+        };
+
+        while (!shutting_down_) {
+            for (const auto& expression : kStartupExpressions) {
+                if (shutting_down_) break;
+                if (display_ != nullptr) {
+                    ESP_LOGI(TAG, "Startup expression: %s", expression.emotion);
+                    display_->SetEmotion(expression.emotion);
+                }
+                vTaskDelay(pdMS_TO_TICKS(expression.duration_ms));
+            }
+        }
+        expression_cycle_task_ = nullptr;
+        vTaskDelete(nullptr);
+    }
+
+    void StartExpressionCycle() {
+        if (xTaskCreate(ExpressionCycleTaskEntry, "expr_cycle", 3072, this, 3,
+                        &expression_cycle_task_) != pdPASS) {
+            expression_cycle_task_ = nullptr;
+            ESP_LOGE(TAG, "Failed to create startup expression cycle task");
+        }
+    }
 
     // ==================== 电源管理：安全上电与深度睡眠关机 ====================
     static void ConfigureOutput(gpio_num_t pin, int level) {
@@ -280,6 +318,10 @@ private:
     // ---------- 关机入口：停止音频、关闭背光并进入深度睡眠 ----------
     void Shutdown() {
         ESP_LOGI(TAG, "Power off: release KEY_ON to enter deep sleep");
+        if (expression_cycle_task_ != nullptr) {
+            vTaskDelete(expression_cycle_task_);
+            expression_cycle_task_ = nullptr;
+        }
         SetScreenOn(false);
         Application::GetInstance().GetAudioService().Stop();
         if (codec_) {
@@ -525,7 +567,7 @@ private:
 
 public:
     // ==================== 板卡启动：按电源、总线、显示、输入的顺序初始化 ====================
-    AiDualEyedDollBoard() : DualNetworkBoard(ML307_TX_PIN, ML307_RX_PIN, ML307_DTR_PIN) {
+    AiDualEyedDollBoard() : DualNetworkBoard(ML307_TX_PIN, ML307_RX_PIN, ML307_DTR_PIN, 0) {
         InitializePowerOff();
         if (!QualifyPowerOn()) ConfigureWakeAndPowerOff();
         EnablePeripheralPower();
@@ -536,6 +578,7 @@ public:
         InitializeButtons();
         InitializeBattery();
         SetScreenOn(true);
+        StartExpressionCycle();
     }
 
     // ==================== 框架接口：音频、显示、网络启动、背光与电池状态 ====================

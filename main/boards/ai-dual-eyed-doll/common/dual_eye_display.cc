@@ -417,6 +417,10 @@ const char* DualEyeDisplay::MapEmotion(const char* emotion) {
     if (strcmp(emotion, "sad") == 0 || strcmp(emotion, "crying") == 0) {
         return "sad";
     }
+    // 双眼资源包未提供独立的 dizzy 动画，使用最接近的惊恐动画表达眩晕。
+    if (strcmp(emotion, "dizzy") == 0) {
+        return "scared";
+    }
     if (strcmp(emotion, "angry") == 0) {
         return "angry";
     }

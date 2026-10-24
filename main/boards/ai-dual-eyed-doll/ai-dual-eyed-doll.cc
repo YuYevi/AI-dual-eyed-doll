@@ -112,19 +112,20 @@ private:
     uint8_t power_emotion_index_ = 0;
 
 
-    // ==================== 开机表情循环：乖巧、开心、眩晕、哭泣 ====================
+    // ==================== 开机表情循环：乖巧、开心、困倦、眩晕、哭泣 ====================
     static void ExpressionCycleTaskEntry(void* arg) {
         static_cast<AiDualEyedDollBoard*>(arg)->ExpressionCycleTask();
     }
 
     void ExpressionCycleTask() {
-        // 资源包实际包含 calm、happy、scared、sad；MapEmotion 将 dizzy/crying
+        // 资源包实际包含 calm、happy、sleepy、scared、sad；MapEmotion 将 dizzy/crying
         // 分别映射到 scared/sad，使循环语义保持为“眩晕、哭泣”。
         static constexpr struct {
             const char* emotion;
             uint32_t duration_ms;
         } kStartupExpressions[] = {
-            {"calm", 5000}, {"happy", 3000}, {"dizzy", 3000}, {"crying", 3000},
+            {"calm", 5000}, {"happy", 3000}, {"sleepy", 3000}, {"dizzy", 3000},
+            {"crying", 3000},
         };
 
         while (!shutting_down_) {

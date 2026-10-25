@@ -353,7 +353,9 @@ private:
     }
 
     void CycleTouch1Emotion() {
-        static constexpr const char* kTouch1Emotions[] = {"sad", "angry", "scared"};
+        // 触摸一按“乖巧、开心、眩晕、哭泣”的顺序循环；当前资源中分别对应
+        // calm、happy、sleepy 和 sad 动画。
+        static constexpr const char* kTouch1Emotions[] = {"calm", "happy", "sleepy", "sad"};
         const char* emotion = kTouch1Emotions[touch1_emotion_index_];
         touch1_emotion_index_ = (touch1_emotion_index_ + 1) %
                                (sizeof(kTouch1Emotions) / sizeof(kTouch1Emotions[0]));

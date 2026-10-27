@@ -5,6 +5,9 @@
 #include <driver/ledc.h>
 #include <memory>
 #include <atomic>
+#include <cstdio>
+#include <cstring>
+#include <string>
 #include <driver/i2c_master.h>
 #include <driver/rtc_io.h>
 #include <driver/spi_common.h>
@@ -131,6 +134,7 @@ private:
     bool power_press_accepted_ = false;
     std::atomic<bool> shutting_down_{false};
     AudioCodec* codec_ = nullptr;
+    TaskHandle_t serial_command_task_ = nullptr;
 
     // ---------- 触摸保护：启动等待、稳定松开与再次触发许可 ----------
     esp_timer_handle_t touch_guard_timer_ = nullptr;
@@ -141,6 +145,59 @@ private:
     uint8_t touch1_emotion_index_ = 0;
     uint8_t power_emotion_index_ = 0;
 
+    static bool IsSupportedEmotion(const char* emotion) {
+        static constexpr const char* kSupportedEmotions[] = {
+            "calm", "happy", "sleepy", "scared", "sad", "angry", "surprised", "shy",
+        };
+        for (const auto* supported : kSupportedEmotions) {
+            if (strcmp(emotion, supported) == 0) return true;
+        }
+        return false;
+    }
+
+    // USB Serial/JTAG: send one text command per line, such as "EMOTE happy".
+    static void SerialCommandTaskEntry(void* arg) {
+        static_cast<AiDualEyedDollBoard*>(arg)->SerialCommandTask();
+    }
+
+    void SerialCommandTask() {
+        char line[32] = {};
+        while (!shutting_down_) {
+            if (fgets(line, sizeof(line), stdin) == nullptr) {
+                vTaskDelay(pdMS_TO_TICKS(10));
+                continue;
+            }
+
+            char command[16] = {};
+            char emotion[16] = {};
+            if (sscanf(line, "%15s %15s", command, emotion) != 2 ||
+                strcmp(command, "EMOTE") != 0) {
+                ESP_LOGW(TAG, "Invalid serial command. Use: EMOTE <calm|happy|sleepy|scared|sad|angry|surprised|shy>");
+                continue;
+            }
+            if (!IsSupportedEmotion(emotion)) {
+                ESP_LOGW(TAG, "Unsupported emotion: %s", emotion);
+                continue;
+            }
+
+            Application::GetInstance().Schedule([this, emotion_copy = std::string(emotion)]() {
+                if (!shutting_down_ && display_ != nullptr) {
+                    ESP_LOGI(TAG, "Serial expression: %s", emotion_copy.c_str());
+                    display_->SetEmotion(emotion_copy.c_str());
+                }
+            });
+        }
+        serial_command_task_ = nullptr;
+        vTaskDelete(nullptr);
+    }
+
+    void StartSerialCommandTask() {
+        if (xTaskCreate(SerialCommandTaskEntry, "serial_emote", 4096, this, 3,
+                        &serial_command_task_) != pdPASS) {
+            serial_command_task_ = nullptr;
+            ESP_LOGE(TAG, "Failed to create serial command task");
+        }
+    }
 
     // ==================== 电源管理：安全上电与深度睡眠关机 ====================
     static void ConfigureOutput(gpio_num_t pin, int level) {
@@ -311,6 +368,10 @@ private:
     // ---------- 关机入口：停止音频、关闭背光并进入深度睡眠 ----------
     void Shutdown() {
         ESP_LOGI(TAG, "Power off: release KEY_ON to enter deep sleep");
+        if (serial_command_task_ != nullptr) {
+            vTaskDelete(serial_command_task_);
+            serial_command_task_ = nullptr;
+        }
         SetScreenOn(false);
         Application::GetInstance().GetAudioService().Stop();
         if (codec_) {
@@ -571,6 +632,7 @@ public:
         InitializeButtons();
         InitializeBattery();
         SetScreenOn(true);
+        StartSerialCommandTask();
     }
 
     // ==================== 框架接口：音频、显示、网络启动、背光与电池状态 ====================
